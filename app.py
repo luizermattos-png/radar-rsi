@@ -16,15 +16,14 @@ MEUS_TICKERS = [
 st.set_page_config(page_title="Monitor Pro", layout="centered")
 
 # --- CABEÇALHO ---
-st.title("📊 Monitor Pro")
+st.title("📊 Monitor Pro Inteligente")
 data_atual = datetime.now().strftime("%d/%m/%Y")
-st.caption(f"📅 {data_atual} | RSI (14) + Tendência (MM50)")
+st.caption(f"📅 {data_atual} | Estratégia: RSI + Tendência (MM50)")
 st.divider()
 
 # Função de Análise
 def analisar_ativo(ticker):
     try:
-        # Baixamos 6 meses para garantir dados para a Média de 50
         df = yf.download(ticker, period="6mo", progress=False)
         if len(df) < 50: return None
 
@@ -49,13 +48,13 @@ def analisar_ativo(ticker):
         if isinstance(mm50_val, pd.Series): mm50_val = mm50_val.item()
         
         # Lógica da Tendência
-        tendencia = "⬆️ Alta" if preco_val > mm50_val else "⬇️ Baixa"
+        tendencia_str = "⬆️ Alta" if preco_val > mm50_val else "⬇️ Baixa"
         
         return {
             'ticker': ticker.replace('.SA', ''), 
             'rsi': rsi_val, 
             'preco': preco_val,
-            'tendencia': tendencia
+            'tendencia': tendencia_str
         }
     except:
         return None
@@ -67,75 +66,74 @@ neutros = []
 
 barra = st.progress(0)
 
+# --- PROCESSAMENTO INTELIGENTE ---
 for i, ticker in enumerate(MEUS_TICKERS):
     dados = analisar_ativo(ticker)
     if dados:
-        if dados['rsi'] <= 30:
+        rsi = dados['rsi']
+        tendencia = dados['tendencia']
+        
+        # Lógica de Oportunidade Refinada
+        eh_oportunidade = False
+        motivo = ""
+
+        # Critério 1: Muito Barato (RSI < 30) - Clássico
+        if rsi <= 30:
+            eh_oportunidade = True
+            motivo = "💎 Barato"
+        
+        # Critério 2: Pullback de Alta (RSI < 50 E Tendência Alta)
+        elif rsi <= 50 and "Alta" in tendencia:
+            eh_oportunidade = True
+            motivo = "🚀 Pullback"
+            
+        if eh_oportunidade:
+            dados['motivo'] = motivo
             oportunidades.append(dados)
-        elif dados['rsi'] >= 70:
+            
+        elif rsi >= 70:
             alertas.append(dados)
         else:
             neutros.append(dados)
+            
     barra.progress((i + 1) / len(MEUS_TICKERS))
 
 barra.empty()
 
+# Ordenar Oportunidades: Primeiro as de Tendência de Alta, depois pelo menor RSI
+if oportunidades:
+    oportunidades.sort(key=lambda x: (0 if "Alta" in x['tendencia'] else 1, x['rsi']))
+
 # --- FUNÇÃO DE DESENHO ---
-def desenhar_tabela(lista_ativos, cor_destaque, icone_titulo, titulo):
+def desenhar_tabela(lista_ativos, cor_destaque, icone_titulo, titulo, mostrar_motivo=False):
     if len(lista_ativos) > 0:
         st.markdown(f"### {icone_titulo} {titulo}")
-        c1, c2, c3, c4 = st.columns([1.5, 1.2, 1.5, 1.5])
-        c1.markdown("**Ativo**")
-        c2.markdown("**RSI**")
-        c3.markdown("**Tend.**")
-        c4.markdown("**Preço**")
+        
+        # Colunas dinâmicas (com ou sem motivo)
+        cols = st.columns([1.5, 1.2, 1.5, 1.5, 1.5]) if mostrar_motivo else st.columns([1.5, 1.2, 1.5, 1.5])
+        
+        cols[0].markdown("**Ativo**")
+        cols[1].markdown("**RSI**")
+        cols[2].markdown("**Tend.**")
+        cols[3].markdown("**Preço**")
+        if mostrar_motivo: cols[4].markdown("**Sinal**")
         
         for item in lista_ativos:
             with st.container():
-                col1, col2, col3, col4 = st.columns([1.5, 1.2, 1.5, 1.5])
-                col1.write(f"**{item['ticker']}**")
-                col2.markdown(f":{cor_destaque}[**{item['rsi']:.0f}**]")
+                c_row = st.columns([1.5, 1.2, 1.5, 1.5, 1.5]) if mostrar_motivo else st.columns([1.5, 1.2, 1.5, 1.5])
+                
+                c_row[0].write(f"**{item['ticker']}**")
+                c_row[1].markdown(f":{cor_destaque}[**{item['rsi']:.0f}**]")
+                
                 cor_tend = "green" if "Alta" in item['tendencia'] else "red"
-                col3.markdown(f":{cor_tend}[{item['tendencia']}]")
-                col4.write(f"{item['preco']:.2f}")
-                st.markdown("<hr style='margin: 5px 0; opacity: 0.1;'>", unsafe_allow_html=True)
-
-# --- EXIBIÇÃO ---
-if oportunidades:
-    st.success(f"{len(oportunidades)} Oportunidades Detectadas")
-    desenhar_tabela(oportunidades, "green", "🟢", "COMPRA (RSI Baixo)")
-else:
-    st.info("Sem oportunidades claras de RSI agora.")
-
-st.divider()
-
-if alertas:
-    desenhar_tabela(alertas, "red", "🔴", "VENDA (RSI Alto)")
-    st.divider()
-
-with st.expander(f"Ver Neutros ({len(neutros)})", expanded=True):
-    desenhar_tabela(neutros, "gray", "⚪", "Observar")
-
-st.write("")
-st.write("")
-
-# --- GUIA DE LEITURA (NOVO) ---
-with st.expander("📚 Guia Rápido: Como analisar este Monitor?"):
-    st.markdown("""
-    ### 1. O que é o RSI?
-    * **Abaixo de 30 (Verde):** O preço caiu muito rápido. O mercado pode estar exagerando no pessimismo. **Possível Compra.**
-    * **Acima de 70 (Vermelho):** O preço subiu muito rápido. O mercado pode estar eufórico. **Possível Venda.**
-
-    ### 2. O Segredo da Tendência (Seta)
-    A seta mostra a Média Móvel de 50 dias:
-    * ⬆️ **Alta:** O preço está ACIMA da média. A "maré" está a subir.
-    * ⬇️ **Baixa:** O preço está ABAIXO da média. A "maré" está a descer.
-
-    ### 3. As Combinações (Estratégia)
-    * 💎 **Ouro (RSI Baixo + Tendência Alta):** O ativo está numa tendência de alta, mas caiu temporariamente ("pullback"). É a melhor chance de comprar barato.
-    * ⚠️ **Faca Caindo (RSI Baixo + Tendência Baixa):** O ativo está barato, mas a tendência é de queda forte. Cuidado, pode cair mais.
-    * 🚀 **Foguete (RSI Alto + Tendência Alta):** O ativo está forte, mas pode estar caro agora. Esperar recuar um pouco.
-    """)
-
-if st.button('Atualizar'):
-    st.rerun()
+                c_row[2].markdown(f":{cor_tend}[{item['tendencia']}]")
+                
+                c_row[3].write(f"{item['preco']:.2f}")
+                
+                if mostrar_motivo:
+                    # Badge visual para o motivo
+                    bg = "#d4edda" if "Pullback" in item['motivo'] else "#cce5ff"
+                    cor_txt = "#155724" if "Pullback" in item['motivo'] else "#004085"
+                    c_row[4].markdown(f"<span style='background-color:{bg}; color:{cor_txt}; padding: 2px 6px; border-radius:4px; font-size:12px;'>{item['motivo']}</span>", unsafe_allow_html=True)
+                
+                st.markdown("<hr style='margin: 5px 0; opacity:
