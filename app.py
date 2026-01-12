@@ -14,51 +14,59 @@ MEUS_TICKERS = [
     "WEGE3.SA"
 ]
 
-st.set_page_config(page_title="Monitor Valuation", layout="centered")
+# CONFIGURAÇÃO DE TELA LARGA (DESKTOP)
+st.set_page_config(page_title="Monitor Valuation Pro", layout="wide")
 
 # --- CABEÇALHO ---
-st.title("💎 Monitor Valuation Pro")
-data_atual = datetime.now().strftime("%d/%m/%Y")
-st.caption(f"📅 {data_atual} | RSI + Tendência + Graham + Bazin")
+c_head1, c_head2 = st.columns([3, 1])
+with c_head1:
+    st.title("💎 Monitor Valuation & Momentum")
+    st.caption("Estratégia Combinada: Benjamin Graham + Décio Bazin + RSI (Técnico)")
+with c_head2:
+    st.write("")
+    st.write(f"📅 **{datetime.now().strftime('%d/%m/%Y')}**")
+
 st.divider()
 
-# Função de Análise Completa
+# Função de Análise
 def analisar_ativo(ticker):
     try:
-        # 1. Obter Dados Fundamentais (Lento, mas necessário para Graham/Bazin)
         obj_ticker = yf.Ticker(ticker)
-        info = obj_ticker.info
         
-        # Histórico para RSI e Tendência
+        # 1. Dados Técnicos (Rápido)
         df = obj_ticker.history(period="6mo")
         if len(df) < 50: return None
-
-        # --- CÁLCULOS TÉCNICOS (RSI + TENDÊNCIA) ---
+        
+        # RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
+        # Tendência
         df['MM50'] = df['Close'].rolling(window=50).mean()
         
         preco_atual = df['Close'].iloc[-1]
         rsi_atual = rsi.iloc[-1]
         mm50_atual = df['MM50'].iloc[-1]
-        tendencia = "⬆️" if preco_atual > mm50_atual else "⬇️"
+        tendencia = "⬆️ Alta" if preco_atual > mm50_atual else "⬇️ Baixa"
 
-        # --- CÁLCULOS FUNDAMENTALISTAS (GRAHAM + BAZIN) ---
+        # 2. Dados Fundamentais (Lento)
+        info = obj_ticker.info
         
-        # Graham: Raiz(22.5 * LPA * VPA)
+        # Graham
         lpa = info.get('trailingEps', 0)
         vpa = info.get('bookValue', 0)
         preco_graham = 0
-        if lpa > 0 and vpa > 0:
+        margem_graham = 0
+        if lpa is not None and vpa is not None and lpa > 0 and vpa > 0:
             preco_graham = math.sqrt(22.5 * lpa * vpa)
-        
-        # Bazin: Dividendos 12m / 6%
-        div_yield_val = info.get('trailingAnnualDividendRate', 0) # Valor em $ pago nos ultimos 12m
-        # Fallback: Se não tiver o Rate, tenta pegar pelo Yield * Preço
+            if preco_graham > 0:
+                margem_graham = ((preco_graham - preco_atual) / preco_atual) * 100
+
+        # Bazin
+        div_yield_val = info.get('trailingAnnualDividendRate', 0)
         if div_yield_val is None or div_yield_val == 0:
              dy_percent = info.get('dividendYield', 0)
              if dy_percent: div_yield_val = dy_percent * preco_atual
@@ -73,43 +81,45 @@ def analisar_ativo(ticker):
             'rsi': rsi_atual, 
             'tendencia': tendencia,
             'graham': preco_graham,
+            'margem_graham': margem_graham,
             'bazin': preco_bazin
         }
-    except Exception as e:
-        # st.error(f"Erro em {ticker}: {e}") # Descomente para debug
+    except Exception:
         return None
 
 # Listas
 oportunidades = []
 neutros = []
 
-texto_loading = st.empty()
-texto_loading.text("⏳ Consultando balanços e preços... Isso pode levar 1 minuto.")
+# Barra de Progresso
+texto_status = st.empty()
+texto_status.info("🚀 Iniciando varredura fundamentalista... Isso leva cerca de 40-60 segundos.")
 barra = st.progress(0)
 
-# --- PROCESSAMENTO ---
+# Loop de Análise
 for i, ticker in enumerate(MEUS_TICKERS):
     dados = analisar_ativo(ticker)
     if dados:
-        # Lógica de Classificação Simples
-        # Se RSI for bom OU se estiver muito descontado em Graham, vai para o topo
-        rsi = dados['rsi']
-        
-        motivo = ""
+        # Lógica de Classificação
         is_op = False
-        
-        # Critérios para "Oportunidade"
-        if rsi <= 35:
-            is_op = True
-            motivo = "RSI Baixo"
-        elif dados['graham'] > 0 and dados['preco'] < (dados['graham'] * 0.7): # 30% margem Graham
-            is_op = True
-            motivo = "Desconto Graham"
-        elif dados['bazin'] > 0 and dados['preco'] < dados['bazin']:
-            is_op = True
-            motivo = "Teto Bazin"
+        motivos = []
 
-        dados['motivo'] = motivo
+        # 1. Técnico Bom
+        if dados['rsi'] <= 35: 
+            motivos.append("RSI Baixo")
+            is_op = True
+        
+        # 2. Fundamentalista Bom (Margem Graham > 20%)
+        if dados['margem_graham'] > 20: 
+            motivos.append(f"Graham +{dados['margem_graham']:.0f}%")
+            is_op = True
+            
+        # 3. Dividendos (Preço abaixo do teto Bazin)
+        if dados['bazin'] > 0 and dados['preco'] < dados['bazin']:
+            motivos.append("Bazin Teto")
+            is_op = True
+
+        dados['motivos'] = ", ".join(motivos)
         
         if is_op:
             oportunidades.append(dados)
@@ -118,58 +128,91 @@ for i, ticker in enumerate(MEUS_TICKERS):
             
     barra.progress((i + 1) / len(MEUS_TICKERS))
 
-texto_loading.empty()
+texto_status.empty()
 barra.empty()
 
-# --- FUNÇÃO DE DESENHO (LAYOUT OTIMIZADO MOBILE) ---
-def desenhar_card(item, cor_borda):
-    with st.container():
-        # CSS para dar um visual de cartão
-        st.markdown(f"""
-        <div style="border-left: 5px solid {cor_borda}; padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-size: 1.2em; font-weight: bold;">{item['ticker']}</span>
-                <span style="font-size: 1.1em;">R$ {item['preco']:.2f}</span>
-                <span style="background-color: #fff; padding: 2px 5px; border-radius: 4px;">RSI: {item['rsi']:.0f} {item['tendencia']}</span>
-            </div>
-            <hr style="margin: 5px 0; opacity: 0.2;">
-            <div style="display: flex; justify-content: space-between; font-size: 0.9em;">
-                <span>⚖️ Graham: {formatar_valor(item['preco'], item['graham'])}</span>
-                <span>💰 Bazin: {formatar_valor(item['preco'], item['bazin'])}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+# --- LAYOUT DE TABELA DESKTOP ---
+def desenhar_cabecalho():
+    c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1.2, 1.2, 1.2, 2])
+    c1.markdown("**Ativo**")
+    c2.markdown("**Preço**")
+    c3.markdown("**RSI**")
+    c4.markdown("**Tendência**")
+    c5.markdown("**Graham (Justo)**")
+    c6.markdown("**Bazin (Teto)**")
+    c7.markdown("**Sinais / Motivos**")
+    st.divider()
 
-def formatar_valor(preco_atual, preco_alvo):
-    if preco_alvo <= 0:
-        return "<span style='color: gray;'>N/A</span>"
+def desenhar_linha(item, destaque=False):
+    # Definindo cores dinâmicas
+    cor_rsi = "green" if item['rsi'] <= 35 else ("red" if item['rsi'] >= 70 else "black")
     
-    cor = "green" if preco_atual < preco_alvo else "black"
-    # Negrito se tiver margem de segurança
-    style = "font-weight:bold;" if preco_atual < preco_alvo else ""
-    return f"<span style='color:{cor}; {style}'>R$ {preco_alvo:.2f}</span>"
+    # Graham: Verde se tiver margem positiva
+    cor_graham = "green" if item['preco'] < item['graham'] else "black"
+    texto_graham = f"R$ {item['graham']:.2f}" if item['graham'] > 0 else "-"
+    
+    # Bazin: Verde se estiver barato
+    cor_bazin = "green" if (item['bazin'] > 0 and item['preco'] < item['bazin']) else "black"
+    texto_bazin = f"R$ {item['bazin']:.2f}" if item['bazin'] > 0 else "-"
+
+    # Tendência cor
+    cor_tend = "green" if "Alta" in item['tendencia'] else "red"
+
+    # Background suave para oportunidades
+    bg_style = "background-color: #f0f8ff; border-radius: 5px; padding: 5px 0;" if destaque else ""
+
+    with st.container():
+        if destaque: st.markdown(f"<div style='{bg_style}'>", unsafe_allow_html=True)
+        
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1.2, 1.2, 1.2, 2])
+        
+        c1.markdown(f"**{item['ticker']}**")
+        c2.markdown(f"R$ {item['preco']:.2f}")
+        c3.markdown(f":{cor_rsi}[**{item['rsi']:.0f}**]")
+        c4.markdown(f":{cor_tend}[{item['tendencia']}]")
+        c5.markdown(f":{cor_graham}[**{texto_graham}**]")
+        c6.markdown(f":{cor_bazin}[**{texto_bazin}**]")
+        
+        if destaque:
+            c7.success(item['motivos'])
+        else:
+            c7.caption("Neutro")
+            
+        if destaque: st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<hr style='margin: 5px 0; opacity: 0.1;'>", unsafe_allow_html=True)
 
 # --- EXIBIÇÃO ---
 
 if oportunidades:
-    st.success(f"💎 {len(oportunidades)} Ativos com Indicadores Interessantes")
+    st.subheader(f"🚀 Oportunidades Identificadas ({len(oportunidades)})")
+    desenhar_cabecalho()
     for item in oportunidades:
-        desenhar_card(item, "#28a745") # Borda Verde
-
-st.divider()
-
-with st.expander(f"Ver Lista Completa / Neutros ({len(neutros)})", expanded=True):
-    for item in neutros:
-        desenhar_card(item, "#6c757d") # Borda Cinza
+        desenhar_linha(item, destaque=True)
+else:
+    st.info("Nenhuma oportunidade óbvia encontrada hoje.")
 
 st.write("")
-# --- LEGENDA ---
-with st.expander("📚 Como ler Valuation?"):
-    st.markdown("""
-    * **Graham:** Preço Justo baseado no lucro e patrimônio. Se o valor estiver **VERDE**, a ação está sendo negociada abaixo do justo.
-    * **Bazin:** Preço Teto para receber 6% de dividendos. Se estiver **VERDE**, o dividendo esperado é superior a 6%.
-    * **N/A:** Significa que a empresa deu prejuízo (sem P/L) ou não pagou dividendos.
-    """)
+st.subheader(f"📋 Lista de Observação ({len(neutros)})")
+desenhar_cabecalho()
+for item in neutros:
+    desenhar_linha(item, destaque=False)
 
-if st.button('🔄 Atualizar Dados'):
+# --- RODAPÉ EXPLICATIVO ---
+st.write("")
+with st.expander("📚 Entenda os Cálculos"):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 🧠 Valuation")
+        st.markdown("""
+        * **Graham:** $\sqrt{22.5 \\times LPA \\times VPA}$. Busca empresas descontadas frente ao lucro e patrimônio.
+        * **Bazin:** $\\frac{Dividendos}{0.06}$. Preço máximo para garantir 6% de retorno em proventos.
+        """)
+    with c2:
+        st.markdown("### 📈 Momentum (Técnico)")
+        st.markdown("""
+        * **RSI < 35:** Sobrevendido (Pode repicar/subir).
+        * **Tendência:** Média Móvel de 50 dias. Se o preço está acima, a tendência é de alta.
+        """)
+
+if st.button('🔄 Atualizar Varredura'):
     st.rerun()
