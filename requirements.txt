@@ -1,7 +1,7 @@
 streamlit
 pandas
-yahooquery
-requests
+yfinance
+requests-cache
 
 
 
