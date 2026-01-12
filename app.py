@@ -136,4 +136,48 @@ def desenhar_tabela(lista_ativos, cor_destaque, icone_titulo, titulo, mostrar_mo
                     cor_txt = "#155724" if "Pullback" in item['motivo'] else "#004085"
                     c_row[4].markdown(f"<span style='background-color:{bg}; color:{cor_txt}; padding: 2px 6px; border-radius:4px; font-size:12px;'>{item['motivo']}</span>", unsafe_allow_html=True)
                 
-                st.markdown("<hr style='margin: 5px 0; opacity:
+                st.markdown("<hr style='margin: 5px 0; opacity: 0.1;'>", unsafe_allow_html=True)
+
+# --- EXIBIÇÃO ---
+
+# 1. Oportunidades (Agora considera RSI e Tendência)
+if oportunidades:
+    st.success(f"{len(oportunidades)} Ativos na Zona de Compra (Desconto ou Tendência)")
+    desenhar_tabela(oportunidades, "green", "🟢", "OPORTUNIDADES", mostrar_motivo=True)
+else:
+    # Caso EXTREMO onde nada se encaixa (raro agora)
+    st.warning("Mercado difícil: Nenhum ativo barato e nenhuma tendência de alta clara.")
+
+st.divider()
+
+# 2. Alertas
+if alertas:
+    desenhar_tabela(alertas, "red", "🔴", "ZONA DE VENDA (RSI Alto)")
+    st.divider()
+
+# 3. Neutros
+with st.expander(f"Ver Neutros ({len(neutros)})", expanded=True):
+    desenhar_tabela(neutros, "gray", "⚪", "Observar (Sem direção clara)")
+
+st.write("")
+st.write("")
+
+# --- GUIA ---
+with st.expander("📚 Entenda os Sinais Novos"):
+    st.markdown("""
+    ### 🟢 Tipos de Oportunidade
+    Agora o sistema encontra dois tipos de compra:
+    
+    1. **💎 Barato (Reversão):**
+       * **O que é:** O RSI caiu abaixo de 30.
+       * **Risco:** Médio/Alto (pode continuar caindo).
+       * **Estratégia:** Tentar pegar o fundo do poço.
+       
+    2. **🚀 Pullback (Tendência):**
+       * **O que é:** O RSI está abaixo de 50, mas a Tendência é de ALTA (Seta para cima).
+       * **Risco:** Baixo (está a favor da maré).
+       * **Estratégia:** O ativo subiu, descansou um pouco e deve voltar a subir. É o melhor cenário.
+    """)
+
+if st.button('Atualizar'):
+    st.rerun()
