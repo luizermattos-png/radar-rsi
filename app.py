@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import math
 from datetime import datetime
 
 # --- CONFIGURAÇÃO DA SUA CARTEIRA ---
@@ -13,171 +14,162 @@ MEUS_TICKERS = [
     "WEGE3.SA"
 ]
 
-st.set_page_config(page_title="Monitor Pro", layout="centered")
+st.set_page_config(page_title="Monitor Valuation", layout="centered")
 
 # --- CABEÇALHO ---
-st.title("📊 Monitor Pro Inteligente")
+st.title("💎 Monitor Valuation Pro")
 data_atual = datetime.now().strftime("%d/%m/%Y")
-st.caption(f"📅 {data_atual} | Estratégia: RSI + Tendência (MM50)")
+st.caption(f"📅 {data_atual} | RSI + Tendência + Graham + Bazin")
 st.divider()
 
-# Função de Análise
+# Função de Análise Completa
 def analisar_ativo(ticker):
     try:
-        df = yf.download(ticker, period="6mo", progress=False)
+        # 1. Obter Dados Fundamentais (Lento, mas necessário para Graham/Bazin)
+        obj_ticker = yf.Ticker(ticker)
+        info = obj_ticker.info
+        
+        # Histórico para RSI e Tendência
+        df = obj_ticker.history(period="6mo")
         if len(df) < 50: return None
 
-        # 1. RSI
+        # --- CÁLCULOS TÉCNICOS (RSI + TENDÊNCIA) ---
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        # 2. Tendência (MM50)
         df['MM50'] = df['Close'].rolling(window=50).mean()
         
-        # Valores atuais
-        rsi_val = rsi.iloc[-1]
-        if isinstance(rsi_val, pd.Series): rsi_val = rsi_val.item()
+        preco_atual = df['Close'].iloc[-1]
+        rsi_atual = rsi.iloc[-1]
+        mm50_atual = df['MM50'].iloc[-1]
+        tendencia = "⬆️" if preco_atual > mm50_atual else "⬇️"
+
+        # --- CÁLCULOS FUNDAMENTALISTAS (GRAHAM + BAZIN) ---
         
-        preco_val = df['Close'].iloc[-1]
-        if isinstance(preco_val, pd.Series): preco_val = preco_val.item()
+        # Graham: Raiz(22.5 * LPA * VPA)
+        lpa = info.get('trailingEps', 0)
+        vpa = info.get('bookValue', 0)
+        preco_graham = 0
+        if lpa > 0 and vpa > 0:
+            preco_graham = math.sqrt(22.5 * lpa * vpa)
         
-        mm50_val = df['MM50'].iloc[-1]
-        if isinstance(mm50_val, pd.Series): mm50_val = mm50_val.item()
+        # Bazin: Dividendos 12m / 6%
+        div_yield_val = info.get('trailingAnnualDividendRate', 0) # Valor em $ pago nos ultimos 12m
+        # Fallback: Se não tiver o Rate, tenta pegar pelo Yield * Preço
+        if div_yield_val is None or div_yield_val == 0:
+             dy_percent = info.get('dividendYield', 0)
+             if dy_percent: div_yield_val = dy_percent * preco_atual
         
-        # Lógica da Tendência
-        tendencia_str = "⬆️ Alta" if preco_val > mm50_val else "⬇️ Baixa"
-        
+        preco_bazin = 0
+        if div_yield_val:
+            preco_bazin = div_yield_val / 0.06
+
         return {
             'ticker': ticker.replace('.SA', ''), 
-            'rsi': rsi_val, 
-            'preco': preco_val,
-            'tendencia': tendencia_str
+            'preco': preco_atual,
+            'rsi': rsi_atual, 
+            'tendencia': tendencia,
+            'graham': preco_graham,
+            'bazin': preco_bazin
         }
-    except:
+    except Exception as e:
+        # st.error(f"Erro em {ticker}: {e}") # Descomente para debug
         return None
 
 # Listas
 oportunidades = []
-alertas = []
 neutros = []
 
+texto_loading = st.empty()
+texto_loading.text("⏳ Consultando balanços e preços... Isso pode levar 1 minuto.")
 barra = st.progress(0)
 
-# --- PROCESSAMENTO INTELIGENTE ---
+# --- PROCESSAMENTO ---
 for i, ticker in enumerate(MEUS_TICKERS):
     dados = analisar_ativo(ticker)
     if dados:
+        # Lógica de Classificação Simples
+        # Se RSI for bom OU se estiver muito descontado em Graham, vai para o topo
         rsi = dados['rsi']
-        tendencia = dados['tendencia']
         
-        # Lógica de Oportunidade Refinada
-        eh_oportunidade = False
         motivo = ""
-
-        # Critério 1: Muito Barato (RSI < 30) - Clássico
-        if rsi <= 30:
-            eh_oportunidade = True
-            motivo = "💎 Barato"
+        is_op = False
         
-        # Critério 2: Pullback de Alta (RSI < 50 E Tendência Alta)
-        elif rsi <= 50 and "Alta" in tendencia:
-            eh_oportunidade = True
-            motivo = "🚀 Pullback"
-            
-        if eh_oportunidade:
-            dados['motivo'] = motivo
+        # Critérios para "Oportunidade"
+        if rsi <= 35:
+            is_op = True
+            motivo = "RSI Baixo"
+        elif dados['graham'] > 0 and dados['preco'] < (dados['graham'] * 0.7): # 30% margem Graham
+            is_op = True
+            motivo = "Desconto Graham"
+        elif dados['bazin'] > 0 and dados['preco'] < dados['bazin']:
+            is_op = True
+            motivo = "Teto Bazin"
+
+        dados['motivo'] = motivo
+        
+        if is_op:
             oportunidades.append(dados)
-            
-        elif rsi >= 70:
-            alertas.append(dados)
         else:
             neutros.append(dados)
             
     barra.progress((i + 1) / len(MEUS_TICKERS))
 
+texto_loading.empty()
 barra.empty()
 
-# Ordenar Oportunidades: Primeiro as de Tendência de Alta, depois pelo menor RSI
-if oportunidades:
-    oportunidades.sort(key=lambda x: (0 if "Alta" in x['tendencia'] else 1, x['rsi']))
+# --- FUNÇÃO DE DESENHO (LAYOUT OTIMIZADO MOBILE) ---
+def desenhar_card(item, cor_borda):
+    with st.container():
+        # CSS para dar um visual de cartão
+        st.markdown(f"""
+        <div style="border-left: 5px solid {cor_borda}; padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-size: 1.2em; font-weight: bold;">{item['ticker']}</span>
+                <span style="font-size: 1.1em;">R$ {item['preco']:.2f}</span>
+                <span style="background-color: #fff; padding: 2px 5px; border-radius: 4px;">RSI: {item['rsi']:.0f} {item['tendencia']}</span>
+            </div>
+            <hr style="margin: 5px 0; opacity: 0.2;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.9em;">
+                <span>⚖️ Graham: {formatar_valor(item['preco'], item['graham'])}</span>
+                <span>💰 Bazin: {formatar_valor(item['preco'], item['bazin'])}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-# --- FUNÇÃO DE DESENHO ---
-def desenhar_tabela(lista_ativos, cor_destaque, icone_titulo, titulo, mostrar_motivo=False):
-    if len(lista_ativos) > 0:
-        st.markdown(f"### {icone_titulo} {titulo}")
-        
-        # Colunas dinâmicas (com ou sem motivo)
-        cols = st.columns([1.5, 1.2, 1.5, 1.5, 1.5]) if mostrar_motivo else st.columns([1.5, 1.2, 1.5, 1.5])
-        
-        cols[0].markdown("**Ativo**")
-        cols[1].markdown("**RSI**")
-        cols[2].markdown("**Tend.**")
-        cols[3].markdown("**Preço**")
-        if mostrar_motivo: cols[4].markdown("**Sinal**")
-        
-        for item in lista_ativos:
-            with st.container():
-                c_row = st.columns([1.5, 1.2, 1.5, 1.5, 1.5]) if mostrar_motivo else st.columns([1.5, 1.2, 1.5, 1.5])
-                
-                c_row[0].write(f"**{item['ticker']}**")
-                c_row[1].markdown(f":{cor_destaque}[**{item['rsi']:.0f}**]")
-                
-                cor_tend = "green" if "Alta" in item['tendencia'] else "red"
-                c_row[2].markdown(f":{cor_tend}[{item['tendencia']}]")
-                
-                c_row[3].write(f"{item['preco']:.2f}")
-                
-                if mostrar_motivo:
-                    # Badge visual para o motivo
-                    bg = "#d4edda" if "Pullback" in item['motivo'] else "#cce5ff"
-                    cor_txt = "#155724" if "Pullback" in item['motivo'] else "#004085"
-                    c_row[4].markdown(f"<span style='background-color:{bg}; color:{cor_txt}; padding: 2px 6px; border-radius:4px; font-size:12px;'>{item['motivo']}</span>", unsafe_allow_html=True)
-                
-                st.markdown("<hr style='margin: 5px 0; opacity: 0.1;'>", unsafe_allow_html=True)
+def formatar_valor(preco_atual, preco_alvo):
+    if preco_alvo <= 0:
+        return "<span style='color: gray;'>N/A</span>"
+    
+    cor = "green" if preco_atual < preco_alvo else "black"
+    # Negrito se tiver margem de segurança
+    style = "font-weight:bold;" if preco_atual < preco_alvo else ""
+    return f"<span style='color:{cor}; {style}'>R$ {preco_alvo:.2f}</span>"
 
 # --- EXIBIÇÃO ---
 
-# 1. Oportunidades (Agora considera RSI e Tendência)
 if oportunidades:
-    st.success(f"{len(oportunidades)} Ativos na Zona de Compra (Desconto ou Tendência)")
-    desenhar_tabela(oportunidades, "green", "🟢", "OPORTUNIDADES", mostrar_motivo=True)
-else:
-    # Caso EXTREMO onde nada se encaixa (raro agora)
-    st.warning("Mercado difícil: Nenhum ativo barato e nenhuma tendência de alta clara.")
+    st.success(f"💎 {len(oportunidades)} Ativos com Indicadores Interessantes")
+    for item in oportunidades:
+        desenhar_card(item, "#28a745") # Borda Verde
 
 st.divider()
 
-# 2. Alertas
-if alertas:
-    desenhar_tabela(alertas, "red", "🔴", "ZONA DE VENDA (RSI Alto)")
-    st.divider()
-
-# 3. Neutros
-with st.expander(f"Ver Neutros ({len(neutros)})", expanded=True):
-    desenhar_tabela(neutros, "gray", "⚪", "Observar (Sem direção clara)")
+with st.expander(f"Ver Lista Completa / Neutros ({len(neutros)})", expanded=True):
+    for item in neutros:
+        desenhar_card(item, "#6c757d") # Borda Cinza
 
 st.write("")
-st.write("")
-
-# --- GUIA ---
-with st.expander("📚 Entenda os Sinais Novos"):
+# --- LEGENDA ---
+with st.expander("📚 Como ler Valuation?"):
     st.markdown("""
-    ### 🟢 Tipos de Oportunidade
-    Agora o sistema encontra dois tipos de compra:
-    
-    1. **💎 Barato (Reversão):**
-       * **O que é:** O RSI caiu abaixo de 30.
-       * **Risco:** Médio/Alto (pode continuar caindo).
-       * **Estratégia:** Tentar pegar o fundo do poço.
-       
-    2. **🚀 Pullback (Tendência):**
-       * **O que é:** O RSI está abaixo de 50, mas a Tendência é de ALTA (Seta para cima).
-       * **Risco:** Baixo (está a favor da maré).
-       * **Estratégia:** O ativo subiu, descansou um pouco e deve voltar a subir. É o melhor cenário.
+    * **Graham:** Preço Justo baseado no lucro e patrimônio. Se o valor estiver **VERDE**, a ação está sendo negociada abaixo do justo.
+    * **Bazin:** Preço Teto para receber 6% de dividendos. Se estiver **VERDE**, o dividendo esperado é superior a 6%.
+    * **N/A:** Significa que a empresa deu prejuízo (sem P/L) ou não pagou dividendos.
     """)
 
-if st.button('Atualizar'):
+if st.button('🔄 Atualizar Dados'):
     st.rerun()
