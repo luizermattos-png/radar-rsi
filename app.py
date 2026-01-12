@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+from datetime import datetime
 
 # --- CONFIGURAÇÃO DA SUA CARTEIRA ---
 MEUS_TICKERS = [
@@ -13,16 +14,12 @@ MEUS_TICKERS = [
 ]
 
 st.set_page_config(page_title="Monitor RSI", layout="centered")
-st.title("📊 Monitor de Mercado")
 
-# Cabeçalho da Tabela (Colunas)
-# Ajuste dos números abaixo muda a largura de cada coluna
-col1, col2, col3, col4 = st.columns([1.5, 1.5, 1.2, 2.5])
-col1.markdown("**Ativo**")
-col2.markdown("**Preço**")
-col3.markdown("**RSI**")
-col4.markdown("**Status**")
-st.divider() # Linha separadora
+# --- CABEÇALHO COM DATA ---
+st.title("📊 Monitor de Mercado")
+data_atual = datetime.now().strftime("%d/%m/%Y")
+st.subheader(f"📅 Data do Relatório: {data_atual}")
+st.divider()
 
 # Função de Análise
 def analisar_ativo(ticker):
@@ -42,44 +39,76 @@ def analisar_ativo(ticker):
         preco_val = df['Close'].iloc[-1]
         if isinstance(preco_val, pd.Series): preco_val = preco_val.item()
         
-        return rsi_val, preco_val
+        return {'ticker': ticker.replace('.SA', ''), 'rsi': rsi_val, 'preco': preco_val}
     except:
         return None
 
-# Loop para criar as linhas
-for ticker in MEUS_TICKERS:
-    dados = analisar_ativo(ticker)
-    
-    if dados:
-        rsi, preco = dados
-        nome_ativo = ticker.replace('.SA', '')
-        
-        # Lógica de Cores e Ícones
-        if rsi <= 30:
-            status = "🟢 COMPRA"
-            cor_rsi = "green"
-            icone = "🟢"
-        elif rsi >= 70:
-            status = "🔴 VENDA"
-            cor_rsi = "red"
-            icone = "🔴"
-        else:
-            status = "Neutro"
-            cor_rsi = "gray"
-            icone = "⚪"
+# Listas para separar as categorias
+oportunidades = []
+alertas = []
+neutros = []
 
-        # Criação das Colunas da Linha
-        c1, c2, c3, c4 = st.columns([1.5, 1.5, 1.2, 2.5])
+# Barra de progresso visual enquanto carrega
+texto_carregando = st.empty()
+texto_carregando.text("A analisar o mercado... Por favor aguarde.")
+barra = st.progress(0)
+
+# Processamento dos dados
+for i, ticker in enumerate(MEUS_TICKERS):
+    dados = analisar_ativo(ticker)
+    if dados:
+        if dados['rsi'] <= 30:
+            oportunidades.append(dados)
+        elif dados['rsi'] >= 70:
+            alertas.append(dados)
+        else:
+            neutros.append(dados)
+    # Atualiza barra de progresso
+    barra.progress((i + 1) / len(MEUS_TICKERS))
+
+texto_carregando.empty() # Limpa o texto de carregamento
+barra.empty() # Limpa a barra
+
+# --- FUNÇÃO PARA DESENHAR AS TABELAS ---
+def desenhar_tabela(lista_ativos, cor_titulo, icone_titulo, titulo_secao):
+    if len(lista_ativos) > 0:
+        st.markdown(f"### {icone_titulo} {titulo_secao}")
         
-        with c1:
-            st.write(f"**{nome_ativo}**")
-        with c2:
-            st.write(f"R$ {preco:.2f}")
-        with c3:
-            # Pinta o número do RSI com a cor correspondente
-            st.markdown(f":{cor_rsi}[{rsi:.0f}]")
-        with c4:
-            st.markdown(f":{cor_rsi}[**{status}**]")
+        # Cabeçalho das Colunas
+        c1, c2, c3 = st.columns([1.5, 1.5, 1.5])
+        c1.markdown("**Ativo**")
+        c2.markdown("**Preço**")
+        c3.markdown("**RSI**")
         
-        # Linha fina entre cada ativo para organizar
-        st.markdown("<hr style='margin: 0px; opacity: 0.2;'>", unsafe_allow_html=True)
+        for item in lista_ativos:
+            with st.container():
+                col1, col2, col3 = st.columns([1.5, 1.5, 1.5])
+                col1.write(f"**{item['ticker']}**")
+                col2.write(f"R$ {item['preco']:.2f}")
+                col3.markdown(f":{cor_titulo}[**{item['rsi']:.0f}**]")
+                st.markdown("<hr style='margin: 5px 0; opacity: 0.1;'>", unsafe_allow_html=True)
+        st.write("") # Espaço extra
+
+# --- EXIBIÇÃO POR CATEGORIAS ---
+
+# 1. Oportunidades (Verde) - Destaque
+if len(oportunidades) > 0:
+    st.success(f"Encontradas {len(oportunidades)} Oportunidades de Compra!")
+    desenhar_tabela(oportunidades, "green", "🟢", "ZONA DE COMPRA (RSI < 30)")
+else:
+    st.info("Nenhuma oportunidade de compra clara hoje.")
+
+st.divider()
+
+# 2. Alertas (Vermelho)
+if len(alertas) > 0:
+    desenhar_tabela(alertas, "red", "🔴", "ALERTA DE VENDA (RSI > 70)")
+    st.divider()
+
+# 3. Neutros (Cinza)
+with st.expander(f"Ver Ativos Neutros ({len(neutros)})", expanded=True):
+    desenhar_tabela(neutros, "gray", "⚪", "Tendência Neutra")
+
+# Botão de atualização
+if st.button('Atualizar Dados Agora'):
+    st.rerun()
