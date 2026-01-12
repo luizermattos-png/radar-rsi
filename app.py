@@ -12,37 +12,41 @@ MEUS_TICKERS = [
     "WEGE3.SA"
 ]
 
-st.set_page_config(page_title="Relatório Financeiro", layout="centered")
-st.title("📊 Relatório de Mercado")
-st.caption("Análise baseada no RSI (14 períodos)")
+st.set_page_config(page_title="Monitor RSI", layout="centered")
+st.title("📊 Monitor de Mercado")
 
-# Função para buscar dados e calcular RSI
+# Cabeçalho da Tabela (Colunas)
+# Ajuste dos números abaixo muda a largura de cada coluna
+col1, col2, col3, col4 = st.columns([1.5, 1.5, 1.2, 2.5])
+col1.markdown("**Ativo**")
+col2.markdown("**Preço**")
+col3.markdown("**RSI**")
+col4.markdown("**Status**")
+st.divider() # Linha separadora
+
+# Função de Análise
 def analisar_ativo(ticker):
     try:
-        # Baixa 3 meses de dados para garantir cálculo preciso
         df = yf.download(ticker, period="3mo", progress=False)
-        if len(df) < 15: return None # Dados insuficientes
+        if len(df) < 15: return None
 
-        # Cálculo do RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        # Pega valores atuais
-        # Tratamento seguro para garantir que pegamos um número, não uma Series
-        rsi_atual = rsi.iloc[-1]
-        if isinstance(rsi_atual, pd.Series): rsi_atual = rsi_atual.item()
+        rsi_val = rsi.iloc[-1]
+        if isinstance(rsi_val, pd.Series): rsi_val = rsi_val.item()
         
-        preco_atual = df['Close'].iloc[-1]
-        if isinstance(preco_atual, pd.Series): preco_atual = preco_atual.item()
+        preco_val = df['Close'].iloc[-1]
+        if isinstance(preco_val, pd.Series): preco_val = preco_val.item()
         
-        return rsi_atual, preco_atual
+        return rsi_val, preco_val
     except:
         return None
 
-# --- GERAÇÃO DO RELATÓRIO (UM ABAIXO DO OUTRO) ---
+# Loop para criar as linhas
 for ticker in MEUS_TICKERS:
     dados = analisar_ativo(ticker)
     
@@ -50,36 +54,32 @@ for ticker in MEUS_TICKERS:
         rsi, preco = dados
         nome_ativo = ticker.replace('.SA', '')
         
-        # Lógica de Recomendação
+        # Lógica de Cores e Ícones
         if rsi <= 30:
-            recomendacao = "🟢 OPORTUNIDADE DE COMPRA"
-            cor_card = "background-color: #d4edda; padding: 10px; border-radius: 10px; border-left: 5px solid #28a745;"
-            cor_texto = "green"
+            status = "🟢 COMPRA"
+            cor_rsi = "green"
+            icone = "🟢"
         elif rsi >= 70:
-            recomendacao = "🔴 ALERTA DE VENDA (Caro)"
-            cor_card = "background-color: #f8d7da; padding: 10px; border-radius: 10px; border-left: 5px solid #dc3545;"
-            cor_texto = "red"
+            status = "🔴 VENDA"
+            cor_rsi = "red"
+            icone = "🔴"
         else:
-            recomendacao = "⚪ NEUTRO (Aguardar)"
-            cor_card = "background-color: #e2e3e5; padding: 10px; border-radius: 10px; border-left: 5px solid #6c757d;"
-            cor_texto = "gray"
+            status = "Neutro"
+            cor_rsi = "gray"
+            icone = "⚪"
 
-        # Exibição Visual (Card)
-        with st.container():
-            st.markdown(f"""
-            <div style="{cor_card} margin-bottom: 15px;">
-                <h3 style="margin:0; color: black;">{nome_ativo}</h3>
-                <h4 style="margin:0; color: black;">R$ {preco:.2f}</h4>
-                <p style="margin:5px 0 0 0; font-weight:bold; color: {cor_texto};">
-                    RSI: {rsi:.1f} | {recomendacao}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        # Opcional: Mostra erro discreto se algum ativo falhar
-        # st.error(f"Erro ao ler {ticker}")
-        pass
-
-# Botão de atualização
-if st.button('Atualizar Cotações'):
-    st.rerun()
+        # Criação das Colunas da Linha
+        c1, c2, c3, c4 = st.columns([1.5, 1.5, 1.2, 2.5])
+        
+        with c1:
+            st.write(f"**{nome_ativo}**")
+        with c2:
+            st.write(f"R$ {preco:.2f}")
+        with c3:
+            # Pinta o número do RSI com a cor correspondente
+            st.markdown(f":{cor_rsi}[{rsi:.0f}]")
+        with c4:
+            st.markdown(f":{cor_rsi}[**{status}**]")
+        
+        # Linha fina entre cada ativo para organizar
+        st.markdown("<hr style='margin: 0px; opacity: 0.2;'>", unsafe_allow_html=True)
