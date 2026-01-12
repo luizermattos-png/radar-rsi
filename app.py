@@ -2,6 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import math
+import time
+import requests
 from datetime import datetime
 
 # ==========================================
@@ -9,7 +11,7 @@ from datetime import datetime
 # ==========================================
 st.set_page_config(page_title="Monitor Valuation Pro", layout="wide")
 
-# --- SUA CARTEIRA ---
+# Lista de Tickers
 MEUS_TICKERS = [
     "ALLD3.SA", "ALOS3.SA", "BBAS3.SA", "BHIA3.SA", "CMIG4.SA",
     "EMBJ3.SA", "FLRY3.SA", "GMAT3.SA", "GUAR3.SA", "HAPV3.SA",
@@ -18,15 +20,14 @@ MEUS_TICKERS = [
     "RDOR3.SA", "SANB4.SA", "UGPA3.SA", "VALE3.SA", "VULC3.SA",
     "WEGE3.SA"
 ]
-# Removi "OCCI" que parecia ser um ticker americano perdido na lista BR
 
 # --- CABEÇALHO ---
 c_head1, c_head2 = st.columns([3, 1])
 with c_head1:
     st.title("💎 Monitor Valuation & Momentum")
-    st.caption("Graham + Bazin + RSI + Indicadores Fundamentalistas")
+    st.caption("Graham + Bazin + RSI + Anti-Bloqueio Yahoo")
 with c_head2:
-    if st.button("🔄 Atualizar Dados"):
+    if st.button("🔄 Forçar Atualização"):
         st.cache_data.clear()
         st.rerun()
     st.write(f"📅 **{datetime.now().strftime('%d/%m/%Y')}**")
@@ -34,109 +35,120 @@ with c_head2:
 st.divider()
 
 # ==========================================
-# FUNÇÃO DE ANÁLISE
+# SESSÃO CAMUFLADA (O SEGREDO PARA NÃO SER BLOQUEADO)
 # ==========================================
-@st.cache_data(ttl=3600)
+def criar_sessao():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    return session
+
+# ==========================================
+# FUNÇÃO DE ANÁLISE ROBUSTA
+# ==========================================
+@st.cache_data(ttl=1800) # Cache de 30 min
 def analisar_ativo(ticker):
     try:
-        obj_ticker = yf.Ticker(ticker)
+        # Cria o ticker usando a sessão camuflada
+        session = criar_sessao()
+        obj_ticker = yf.Ticker(ticker, session=session)
         
-        # 1. DADOS TÉCNICOS (Preço e RSI) - Geralmente funcionam bem
-        # Usamos 'auto_adjust=False' para evitar problemas com splits recentes
-        df = obj_ticker.history(period="6mo", auto_adjust=False)
-        
-        if len(df) < 50: 
-            return None
-        
-        # Ajuste manual se o dataframe vier vazio ou com colunas estranhas
-        if 'Close' not in df.columns:
-            return None
+        # 1. PREÇO ATUAL (Via fast_info, que é mais rápido e confiável)
+        try:
+            preco_atual = obj_ticker.fast_info['last_price']
+        except:
+            # Fallback: tenta pegar do histórico se o fast_info falhar
+            hist = obj_ticker.history(period="1d")
+            if len(hist) > 0:
+                preco_atual = hist['Close'].iloc[-1]
+            else:
+                return None # Sem preço, ativo inválido
 
-        # RSI Calculation
+        # 2. RSI (Precisa de histórico)
+        df = obj_ticker.history(period="3mo")
+        if len(df) < 30: return None
+        
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
+        rsi_atual = 100 - (100 / (1 + rs.iloc[-1]))
         
-        # Tendência (MM50)
-        df['MM50'] = df['Close'].rolling(window=50).mean()
-        
-        preco_atual = df['Close'].iloc[-1]
-        rsi_atual = rsi.iloc[-1]
-        mm50_atual = df['MM50'].iloc[-1]
-        tendencia = "⬆️ Alta" if preco_atual > mm50_atual else "⬇️ Baixa"
+        # Tendência MM50
+        mm50 = df['Close'].rolling(window=50).mean().iloc[-1]
+        tendencia = "⬆️ Alta" if preco_atual > mm50 else "⬇️ Baixa"
 
-        # 2. DADOS FUNDAMENTAIS (Graham/Bazin) - A parte problemática
-        # Inicializa com None para diferenciar "Zero" de "Sem Dados"
-        lpa = None
-        vpa = None
-        roe = None
-        pl = None
-        pvp = None
-        dy_percent = None
-        
+        # 3. FUNDAMENTOS (A parte que estava falhando)
+        # O try/except aqui garante que o código não quebre se o Yahoo negar dados
+        info = {}
         try:
             info = obj_ticker.info
-            # Tenta pegar chaves alternativas caso o Yahoo mude o nome
-            lpa = info.get('trailingEps') or info.get('forwardEps')
-            vpa = info.get('bookValue')
-            roe = info.get('returnOnEquity')
-            pl = info.get('trailingPE')
-            pvp = info.get('priceToBook')
-            dy_percent = info.get('dividendYield')
-        except:
-            pass # Falha silenciosa na coleta de info para não travar o app
+        except Exception:
+            pass # Segue o baile com dicionário vazio
+        
+        # Extração Segura de Dados
+        lpa = info.get('trailingEps') or info.get('forwardEps')
+        vpa = info.get('bookValue')
+        roe = info.get('returnOnEquity')
+        pl = info.get('trailingPE')
+        pvp = info.get('priceToBook')
+        dy_percent = info.get('dividendYield')
 
-        # Cálculos de Valuation
+        # Cálculos Valuation
         preco_graham = None
         margem_graham = None
         
+        # Lógica Graham
         if lpa and vpa and lpa > 0 and vpa > 0:
             try:
                 val_graham = math.sqrt(22.5 * lpa * vpa)
                 preco_graham = val_graham
                 margem_graham = ((val_graham - preco_atual) / preco_atual) * 100
-            except:
-                pass
+            except: pass
 
+        # Lógica Bazin
         preco_bazin = None
-        # Tenta calcular DY em valor financeiro se não vier pronto
-        dy_valor = 0
         if dy_percent and dy_percent > 0:
             dy_valor = dy_percent * preco_atual
             preco_bazin = dy_valor / 0.06
+
+        # Pequena pausa para evitar bloqueio do Yahoo (IMPORTANTE)
+        time.sleep(0.5)
 
         return {
             'ticker': ticker.replace('.SA', ''), 
             'preco': preco_atual,
             'rsi': rsi_atual, 
             'tendencia': tendencia,
-            'graham': preco_graham,       # Pode ser None
-            'margem_graham': margem_graham, # Pode ser None
-            'bazin': preco_bazin,         # Pode ser None
-            'roe': roe,                   # Pode ser None
-            'pl': pl,                     # Pode ser None
-            'pvp': pvp,                   # Pode ser None
-            'dy': dy_percent              # Pode ser None
+            'graham': preco_graham,
+            'margem_graham': margem_graham,
+            'bazin': preco_bazin,
+            'roe': roe,
+            'pl': pl,
+            'pvp': pvp,
+            'dy': dy_percent
         }
+
     except Exception as e:
+        # print(f"Erro em {ticker}: {e}")
         return None
 
 # ==========================================
-# LOOP DE EXECUÇÃO
+# LOOP PRINCIPAL
 # ==========================================
-
 oportunidades = []
 neutros = []
 
 texto_status = st.empty()
 bar = st.progress(0)
 
-# Processamento
 total = len(MEUS_TICKERS)
+
+# Loop com barra de progresso
 for i, ticker in enumerate(MEUS_TICKERS):
-    texto_status.text(f"Analisando {ticker} ({i+1}/{total})...")
+    texto_status.markdown(f"🔍 Analisando **{ticker}** ({i+1}/{total})...")
+    
     dados = analisar_ativo(ticker)
     bar.progress((i + 1) / total)
     
@@ -144,17 +156,15 @@ for i, ticker in enumerate(MEUS_TICKERS):
         is_op = False
         motivos = []
 
-        # RSI Baixo (<30 é mais conservador, <35 mais agressivo)
+        # Critérios de Oportunidade
         if dados['rsi'] <= 35: 
             motivos.append("RSI Baixo")
             is_op = True
         
-        # Graham com margem (só se tiver dados)
         if dados['margem_graham'] and dados['margem_graham'] > 20: 
             motivos.append(f"Graham +{dados['margem_graham']:.0f}%")
             is_op = True
             
-        # Bazin (só se tiver dados)
         if dados['bazin'] and dados['preco'] < dados['bazin']:
             motivos.append("Teto Bazin")
             is_op = True
@@ -170,9 +180,8 @@ texto_status.empty()
 bar.empty()
 
 # ==========================================
-# FUNÇÕES DE DESENHO (INTERFACE)
+# INTERFACE GRÁFICA
 # ==========================================
-# Ajustei as proporções das colunas para caber melhor
 cols_ratio = [0.8, 0.9, 0.6, 0.8, 1, 1, 2, 0.8, 0.8, 0.8, 0.8]
 
 def desenhar_cabecalho():
@@ -183,9 +192,7 @@ def desenhar_cabecalho():
     st.divider()
 
 def fmt_val(valor, prefix="R$ ", suffix="", casas=2):
-    """Formata valores lidando com None"""
-    if valor is None:
-        return "-"
+    if valor is None: return "-"
     return f"{prefix}{valor:.{casas}f}{suffix}"
 
 def fmt_cor(texto, cor):
@@ -193,69 +200,52 @@ def fmt_cor(texto, cor):
     return f":{cor}[{texto}]"
 
 def desenhar_linha(item, destaque=False):
-    # Cores
-    cor_rsi = "green" if item['rsi'] <= 35 else ("red" if item['rsi'] >= 70 else "black")
+    # Definição de Cores
+    cor_rsi = "green" if item['rsi'] <= 35 else ("red" if item['rsi'] >= 70 else "gray")
     cor_tend = "green" if "Alta" in item['tendencia'] else "red"
     
-    # Só pinta de verde se o dado existir (is not None)
-    cor_graham = "green" if (item['graham'] and item['preco'] < item['graham']) else "black"
-    cor_bazin = "green" if (item['bazin'] and item['preco'] < item['bazin']) else "black"
+    cor_graham = "green" if (item['graham'] and item['preco'] < item['graham']) else "gray"
+    cor_bazin = "green" if (item['bazin'] and item['preco'] < item['bazin']) else "gray"
     
-    cor_roe = "green" if (item['roe'] and item['roe'] > 0.15) else "black"
-    cor_pl = "green" if (item['pl'] and 0 < item['pl'] < 10) else "black"
-    cor_pvp = "green" if (item['pvp'] and 0 < item['pvp'] < 1.5) else "black"
-    cor_dy = "green" if (item['dy'] and item['dy'] > 0.06) else "black"
+    cor_roe = "green" if (item['roe'] and item['roe'] > 0.15) else "gray"
+    cor_pl = "green" if (item['pl'] and 0 < item['pl'] < 10) else "gray"
+    cor_pvp = "green" if (item['pvp'] and 0 < item['pvp'] < 1.5) else "gray"
+    cor_dy = "green" if (item['dy'] and item['dy'] > 0.06) else "gray"
 
     with st.container():
         if destaque: st.markdown("---")
-        
         cols = st.columns(cols_ratio)
         
-        # 1. Ativo e Preço
         cols[0].markdown(f"**{item['ticker']}**")
         cols[1].markdown(f"R$ {item['preco']:.2f}")
-        
-        # 2. Técnicos
         cols[2].markdown(fmt_cor(f"**{item['rsi']:.0f}**", cor_rsi))
         cols[3].markdown(fmt_cor(item['tendencia'], cor_tend))
         
-        # 3. Valuation
         cols[4].markdown(fmt_cor(fmt_val(item['graham']), cor_graham))
         cols[5].markdown(fmt_cor(fmt_val(item['bazin']), cor_bazin))
         
-        # 4. Motivos
         if destaque: cols[6].success(item['motivos'])
         else: cols[6].caption("-")
             
-        # 5. Fundamentos
-        # Multiplicamos por 100 para % onde necessário, mas verificamos se não é None antes
-        val_roe = item['roe'] * 100 if item['roe'] is not None else None
+        # Indicadores fundamentalistas
+        val_roe = item['roe'] * 100 if item['roe'] else None
         cols[7].markdown(fmt_cor(fmt_val(val_roe, prefix="", suffix="%", casas=1), cor_roe))
         
         cols[8].markdown(fmt_cor(fmt_val(item['pl'], prefix="", casas=1), cor_pl))
-        
         cols[9].markdown(fmt_cor(fmt_val(item['pvp'], prefix="", casas=2), cor_pvp))
         
-        val_dy = item['dy'] * 100 if item['dy'] is not None else None
+        val_dy = item['dy'] * 100 if item['dy'] else None
         cols[10].markdown(fmt_cor(fmt_val(val_dy, prefix="", suffix="%", casas=1), cor_dy))
 
-# ==========================================
-# RENDERIZAÇÃO
-# ==========================================
+# Renderização
 if oportunidades:
     st.subheader(f"🚀 Oportunidades ({len(oportunidades)})")
     desenhar_cabecalho()
     for item in oportunidades:
         desenhar_linha(item, destaque=True)
-else:
-    st.info("Nenhuma oportunidade clara hoje.")
 
 st.write("")
 st.subheader(f"📋 Lista de Observação ({len(neutros)})")
 desenhar_cabecalho()
 for item in neutros:
     desenhar_linha(item, destaque=False)
-
-# Rodapé
-st.write("")
-st.caption("Nota: Se os campos de valuation (Graham/Bazin/Fundamentos) aparecerem como '-', significa que o Yahoo Finance não forneceu os dados fundamentais para este ativo neste momento. Tente atualizar a página em alguns minutos.")
