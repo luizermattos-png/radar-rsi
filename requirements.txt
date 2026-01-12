@@ -1,7 +1,7 @@
 streamlit
 pandas
-yfinance
-requests-cache
+yfinance>=0.2.50
+
 
 
 
