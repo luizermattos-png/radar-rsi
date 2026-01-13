@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ==========================================
 # CONFIGURAÇÃO
@@ -50,7 +50,7 @@ def analisar_carteira(lista_tickers):
                     continue 
             
             # 2. TÉCNICA (RSI + TENDÊNCIA)
-            hist_long = stock.history(period="3mo")
+            hist_long = stock.history(period="6mo") # Pegamos 6 meses para garantir médias e dividendos
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -64,7 +64,24 @@ def analisar_carteira(lista_tickers):
                 rsi = 50
                 tendencia = "-"
 
-            # 3. FUNDAMENTOS
+            # 3. DY REAL (CÁLCULO NA RAÇA: Soma dos dividendos pagos nos últimos 12m)
+            try:
+                # Pega histórico de dividendos
+                divs = stock.dividends
+                if not divs.empty:
+                    # Filtra últimos 365 dias
+                    # Remove fuso horário para comparação segura
+                    cutoff = pd.Timestamp.now().replace(tzinfo=None) - pd.Timedelta(days=365)
+                    divs.index = divs.index.tz_localize(None) 
+                    
+                    soma_12m = divs[divs.index >= cutoff].sum()
+                    dy = soma_12m / preco # Resultado decimal puro (ex: 0.0524)
+                else:
+                    dy = 0.0
+            except:
+                dy = 0.0
+
+            # 4. FUNDAMENTOS (Info)
             info = {}
             try: info = stock.info
             except: pass 
@@ -75,33 +92,16 @@ def analisar_carteira(lista_tickers):
             roe = get_i('returnOnEquity')
             pl = get_i('trailingPE')
             pvp = get_i('priceToBook')
-            
-            # --- CORREÇÃO DO DY (CÁLCULO MANUAL) ---
-            # Pegamos o valor pago em R$ no ano (rate) e dividimos pelo preço
-            div_rate = get_i('trailingAnnualDividendRate') 
-            dy = 0
-            
-            if div_rate:
-                # Cálculo exato: Div Pago / Preço Atual
-                dy = div_rate / preco
-            else:
-                # Fallback: se não tiver o Rate, tenta pegar o Yield e garante que é decimal
-                raw_yield = get_i('dividendYield')
-                if raw_yield:
-                    # Se for maior que 1 (ex: 5.24), assume que já é porcentagem e divide por 100
-                    # Se for menor que 1 (ex: 0.05), usa como está
-                    dy = raw_yield / 100 if raw_yield > 1 else raw_yield
 
-            # Valuation
+            # Valuation (Apenas Visual)
             graham = None
             if lpa and vpa and lpa > 0 and vpa > 0:
                 try: graham = math.sqrt(22.5 * lpa * vpa)
                 except: pass
 
             bazin = None
-            # Cálculo reverso de Bazin: Preço Teto = (DY em R$ / 0.06)
-            # Se tivermos o rate (valor em R$), usamos ele. Se não, derivamos do DY.
-            val_pago_ano = div_rate if div_rate else (dy * preco)
+            # Preço Teto Bazin: DY em R$ / 0.06
+            val_pago_ano = dy * preco
             if val_pago_ano > 0:
                 bazin = val_pago_ano / 0.06
 
@@ -115,23 +115,29 @@ def analisar_carteira(lista_tickers):
                 'roe': roe,
                 'pl': pl,
                 'pvp': pvp,
-                'dy': dy, # Agora isso é garantidamente um decimal (ex: 0.05)
+                'dy': dy,
                 'sinal': 'NEUTRO',
                 'motivos': []
             }
             
-            # --- DECISÃO (RSI + TENDENCIA) ---
+            # --- LÓGICA DE DECISÃO (PEDIDO DO USUÁRIO) ---
+            
+            # 1. Oportunidade por Sobrevenda (Tática)
             if rsi <= 35:
                 dados['motivos'].append("RSI Baixo")
                 dados['sinal'] = 'COMPRA'
             
+            # 2. Oportunidade por Qualidade (Tendência + Fundamentos)
+            # Regra: Tendência Alta + P/L Saudável + ROE Bom
             elif tendencia == "Alta":
                 condicao_pl = (pl is not None and 0 < pl < 15)
                 condicao_roe = (roe is not None and roe > 0.10)
+                
                 if condicao_pl and condicao_roe:
-                    dados['motivos'].append("Tendência + Fundamentos")
+                    dados['motivos'].append("Tendência + Qualidade")
                     dados['sinal'] = 'COMPRA'
 
+            # 3. Venda (Risco)
             if rsi >= 70:
                 dados['motivos'].append("RSI Estourado")
                 dados['sinal'] = 'VENDA'
@@ -175,10 +181,10 @@ with c_compra:
     st.info(f"🟢 **Comprar ({len(compras)})**")
     if compras:
         for c in compras:
-            motivo = c['motivos'][0] if c['motivos'] else "Análise Técnica"
+            motivo = c['motivos'][0]
             st.markdown(f"**{c['ticker']}** (R$ {c['preco']:.2f}) 👉 *{motivo}*")
     else:
-        st.caption("Nenhuma oportunidade detectada.")
+        st.caption("Nenhuma oportunidade nos critérios atuais.")
 
 with c_venda:
     st.error(f"🔴 **Vender / Risco ({len(vendas)})**")
@@ -206,8 +212,8 @@ def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
         if meta and inverter and valor < meta: cor = "green"
 
     elif tipo == "percentual":
-        # Agora temos certeza que vem decimal (0.05), então multiplicamos por 100 sempre
-        texto = f"{valor*100:.1f}%" 
+        # Multiplicamos por 100 pois agora o DY é sempre decimal (0.05)
+        texto = f"{valor*100:.2f}%" 
         if meta and valor > meta: cor = "green"
 
     elif tipo == "decimal":
@@ -245,6 +251,7 @@ def desenhar_tabela(lista, titulo):
         if cor_t: c[3].markdown(f":{cor_t}[{tend}]")
         else: c[3].write(tend)
 
+        # Graham/Bazin (Só visual)
         exibir_metrica(c[4], item['graham'], tipo="dinheiro", meta=item['preco'], inverter=False)
         exibir_metrica(c[5], item['bazin'], tipo="dinheiro", meta=item['preco'], inverter=False)
         
@@ -271,14 +278,16 @@ else:
 # 3. CRITÉRIOS
 # ==========================================
 st.write("")
-with st.expander("ℹ️ Critérios do Algoritmo", expanded=True):
+with st.expander("ℹ️ Lógica do Robô (Como ele decide?)", expanded=True):
     st.markdown("""
-    **Sinal de COMPRA:**
-    1.  **RSI Baixo:** RSI <= 35 (Repique Tático).
-    2.  **Qualidade:** Tendência de Alta + P/L Baixo (<15) + ROE Alto (>10%).
+    **Sinal de COMPRA (Verde):**
+    1.  **Repique Técnico:** RSI <= 35.
+    2.  **Qualidade:** Tendência de Alta + (P/L entre 0 e 15) + (ROE > 10%).
     
-    **Sinal de VENDA:**
-    * **RSI Alto:** RSI >= 70 (Esticado).
+    **Sinal de VENDA (Vermelho):**
+    * **Risco:** RSI >= 70.
+    
+    *Nota: Graham e Bazin não influenciam os sinais, use-os como referência manual.*
     """)
 
 if erros_log:
