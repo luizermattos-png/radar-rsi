@@ -49,12 +49,20 @@ def analisar_carteira(lista_tickers):
                     erros.append(f"{ticker}: Sem cotação")
                     continue 
             
-            # 2. TÉCNICA (RSI + TENDÊNCIA)
+            # 2. TÉCNICA (RSI CALIBRADO - WILDER'S SMOOTHING)
+            # Pegamos 6 meses para que a média exponencial tenha tempo de estabilizar
             hist_long = stock.history(period="6mo") 
+            
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                
+                # --- CORREÇÃO MATEMÁTICA AQUI ---
+                # Antes (Errado): rolling(window=14).mean() -> Média Simples
+                # Agora (Certo/Investing): ewm(alpha=1/14).mean() -> Média Exponencial de Wilder
+                
+                gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+                loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+                
                 rs = gain / loss
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 
@@ -113,38 +121,37 @@ def analisar_carteira(lista_tickers):
                 'dy': dy,
                 'sinal': 'NEUTRO',
                 'motivos': [],
-                'score_ouro': False # Flag especial
+                'score_ouro': False
             }
             
             # --- LÓGICA DE DECISÃO ---
             
-            # CRITÉRIOS DE FUNDAMENTOS
+            # Critérios de Fundamentos
             f_ok_pl = (pl is not None and 0 < pl < 15)
             f_ok_roe = (roe is not None and roe > 0.10)
             fundamentos_bons = f_ok_pl and f_ok_roe
 
-            # 1. 🏆 OPORTUNIDADE DE OURO (Combinação Perfeita)
-            # Regra: Tendência Alta + Fundamentos Bons + RSI Saudável (Não estourado)
+            # 1. 🏆 OPORTUNIDADE DE OURO
             if tendencia == "Alta" and fundamentos_bons and rsi < 65:
                 dados['motivos'].append("💎 TENDÊNCIA + FUNDAMENTOS")
                 dados['sinal'] = 'COMPRA OURO'
                 dados['score_ouro'] = True
             
-            # 2. Compra Tática (RSI Baixo)
+            # 2. Compra Tática
             elif rsi <= 35:
                 dados['motivos'].append("RSI Baixo (Repique)")
                 dados['sinal'] = 'COMPRA'
             
-            # 3. Compra por Qualidade (Se não for ouro, mas tiver fundamentos bons e tendência)
+            # 3. Compra por Qualidade
             elif tendencia == "Alta" and fundamentos_bons:
                 dados['motivos'].append("Qualidade Técnica")
                 dados['sinal'] = 'COMPRA'
 
             # 4. Venda
             if rsi >= 70:
-                dados['motivos'] = ["RSI Estourado"] # Sobrescreve motivos de compra se estiver perigoso
+                dados['motivos'] = ["RSI Estourado"] 
                 dados['sinal'] = 'VENDA'
-                dados['score_ouro'] = False # Anula ouro se tiver risco alto
+                dados['score_ouro'] = False
             
             resultados.append(dados)
 
@@ -171,21 +178,15 @@ with col_top2:
 
 dados, erros_log = analisar_carteira(MEUS_TICKERS)
 
-# Filtros de Grupo
 ouros = [d for d in dados if d['score_ouro']]
-# Compras normais (exclui os ouros para não repetir)
 compras_normais = [d for d in dados if d['sinal'] == 'COMPRA' and not d['score_ouro']]
 vendas = [d for d in dados if d['sinal'] == 'VENDA']
 neutros = [d for d in dados if d['sinal'] == 'NEUTRO']
 
-# ==========================================
-# 1. SESSÃO DE OURO (NOVA)
-# ==========================================
+# 1. SESSÃO DE OURO
 if ouros:
     st.markdown("### 🏆 Oportunidades de Ouro (Técnica + Fundamentos)")
-    # Cria cards visuais lado a lado
     cols = st.columns(len(ouros)) if len(ouros) < 4 else st.columns(4)
-    
     for i, item in enumerate(ouros):
         col_idx = i % 4
         with cols[col_idx]:
@@ -193,13 +194,11 @@ if ouros:
             **{item['ticker']}** (R$ {item['preco']:.2f})  
             ✅ Tendência de Alta  
             ✅ P/L: {item['pl']:.1f} | ROE: {item['roe']*100:.0f}%  
-            ✅ RSI: {item['rsi']:.0f} (Saudável)
+            ✅ RSI: {item['rsi']:.0f} (Wilder)
             """)
     st.markdown("---")
 
-# ==========================================
 # 2. RADAR GERAL
-# ==========================================
 st.subheader("📢 Radar Geral")
 c_compra, c_venda = st.columns(2)
 
@@ -222,9 +221,7 @@ with c_venda:
 
 st.markdown("---")
 
-# ==========================================
 # 3. TABELA DETALHADA
-# ==========================================
 def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
     if valor is None:
         coluna.caption("-")
@@ -267,7 +264,6 @@ def desenhar_tabela(lista, titulo):
     for item in lista:
         c = st.columns(cols_cfg)
         
-        # Destaque visual para OURO
         if item['score_ouro']:
             c[0].markdown(f"⭐ **{item['ticker']}**")
         else:
@@ -286,7 +282,7 @@ def desenhar_tabela(lista, titulo):
         
         if item['motivos']: 
             if item['sinal'] == 'VENDA': c[6].error(item['motivos'][0])
-            elif item['score_ouro']: c[6].warning("💎 GOLD (Téc+Fund)")
+            elif item['score_ouro']: c[6].warning("💎 GOLD")
             else: c[6].success(item['motivos'][0])
         else: c[6].caption("-")
         
@@ -300,26 +296,18 @@ def desenhar_tabela(lista, titulo):
 if not dados and erros_log:
     st.error("Falha ao obter dados. Tente atualizar novamente.")
 else:
-    # A lista de Ouros é exibida primeiro na tabela também
-    desenhar_tabela(ouros, "🏆 Seleção de Ouro (Top Picks)")
+    desenhar_tabela(ouros, "🏆 Seleção de Ouro")
     desenhar_tabela(compras_normais, "🚀 Oportunidades Táticas")
     desenhar_tabela(vendas, "⚠️ Atenção (Venda)")
     desenhar_tabela(neutros, "📋 Lista de Observação")
 
-# ==========================================
-# 3. CRITÉRIOS
-# ==========================================
+# 4. CRITÉRIOS
 st.write("")
-with st.expander("ℹ️ Critérios de Classificação", expanded=True):
+with st.expander("ℹ️ Ajustes Técnicos Realizados", expanded=True):
     st.markdown("""
-    **🏆 OPORTUNIDADE DE OURO (Critério Triplo):**
-    O ativo precisa atender **TODOS** os pontos abaixo simultaneamente:
-    1.  **Tendência:** Alta (Preço > MM50).
-    2.  **Fundamentos:** Barata (P/L < 15) E Eficiente (ROE > 10%).
-    3.  **RSI:** Saudável (Abaixo de 65, com espaço para subir).
+    **RSI Calibrado (Wilder's Smoothing):** Agora o cálculo usa Média Exponencial (alpha=1/14) em vez de Simples, para alinhar os valores com o **Investing.com**.
     
-    **🚀 COMPRA TÁTICA:**
-    * RSI Baixo (<= 35) **OU** Bons Fundamentos em Tendência de Alta (mas sem cumprir todos os critérios de Ouro).
+    *Nota: Pequenas diferenças (decimais) ainda podem ocorrer se o Investing.com estiver usando dados intra-day (minuto a minuto) e nós usarmos o fechamento diário.*
     """)
 
 if erros_log:
