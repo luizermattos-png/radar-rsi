@@ -22,7 +22,7 @@ MEUS_TICKERS = [
 # ==========================================
 # FUNÇÃO DE ANÁLISE (NATIVA YFINANCE)
 # ==========================================
-@st.cache_data(ttl=900) # Cache do próprio Streamlit (15 min)
+@st.cache_data(ttl=900) # Cache de 15 min
 def analisar_carteira(lista_tickers):
     resultados = []
     erros = []
@@ -37,10 +37,9 @@ def analisar_carteira(lista_tickers):
         progresso.progress((i + 1) / total)
         
         try:
-            # Instancia normal (sem sessão customizada, pois o YF novo não aceita)
             stock = yf.Ticker(ticker)
             
-            # 1. PEGAR PREÇO (Tenta fast_info, se falhar vai pro histórico)
+            # 1. PREÇO
             try:
                 preco = stock.fast_info['last_price']
             except:
@@ -49,9 +48,9 @@ def analisar_carteira(lista_tickers):
                     preco = hist['Close'].iloc[-1]
                 else:
                     erros.append(f"{ticker}: Sem preço")
-                    continue # Pula este ticker
+                    continue 
             
-            # 2. CALCULAR RSI
+            # 2. RSI
             hist_long = stock.history(period="3mo")
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
@@ -66,15 +65,13 @@ def analisar_carteira(lista_tickers):
                 rsi = 50
                 tendencia = "-"
 
-            # 3. PEGAR FUNDAMENTOS (Info)
-            # O try/except aqui evita que um erro de conexão pare tudo
+            # 3. FUNDAMENTOS
             info = {}
             try:
                 info = stock.info
             except Exception:
-                pass # Segue com info vazia se der erro
+                pass 
 
-            # Extração de dados (com proteção contra Nulos)
             def get_i(key): return info.get(key)
             
             lpa = get_i('trailingEps') or get_i('forwardEps')
@@ -84,7 +81,7 @@ def analisar_carteira(lista_tickers):
             pvp = get_i('priceToBook')
             dy = get_i('dividendYield')
 
-            # Cálculos Valuation
+            # Valuation
             graham = None
             if lpa and vpa and lpa > 0 and vpa > 0:
                 try: graham = math.sqrt(22.5 * lpa * vpa)
@@ -94,7 +91,6 @@ def analisar_carteira(lista_tickers):
             if dy and dy > 0:
                 bazin = (dy * preco) / 0.06
 
-            # Monta o objeto de dados
             dados = {
                 'ticker': ticker.replace('.SA', ''),
                 'preco': preco,
@@ -109,7 +105,7 @@ def analisar_carteira(lista_tickers):
                 'motivos': []
             }
             
-            # Filtros de Oportunidade
+            # Filtros
             if rsi <= 35: dados['motivos'].append("RSI Baixo")
             if graham and preco < graham: dados['motivos'].append("Desc. Graham")
             if bazin and preco < bazin: dados['motivos'].append("Teto Bazin")
@@ -119,7 +115,7 @@ def analisar_carteira(lista_tickers):
         except Exception as e:
             erros.append(f"{ticker}: {str(e)}")
         
-        # PAUSA OBRIGATÓRIA (Para o Yahoo não bloquear)
+        # Pausa anti-bloqueio
         time.sleep(1.0) 
 
     progresso.empty()
@@ -131,7 +127,7 @@ def analisar_carteira(lista_tickers):
 # ==========================================
 c1, c2 = st.columns([3, 1])
 c1.title("💎 Monitor Valuation Pro")
-c1.caption("Versão Compatível: yfinance v0.2.50+")
+c1.caption("Versão Corrigida: Formatação Segura")
 
 if c2.button("🔄 Atualizar Agora"):
     st.cache_data.clear()
@@ -139,10 +135,8 @@ if c2.button("🔄 Atualizar Agora"):
 
 st.divider()
 
-# Chama a função principal
 dados, erros_log = analisar_carteira(MEUS_TICKERS)
 
-# Separação
 oportunidades = [d for d in dados if d['motivos']]
 neutros = [d for d in dados if not d['motivos']]
 
@@ -160,7 +154,7 @@ def cor(val, limite, invert=False):
     if invert: return "green" if val < limite else "black"
     return "green" if val > limite else "black"
 
-# Função de Desenho da Tabela
+# Config Tabela
 cols_cfg = [0.8, 0.8, 0.6, 0.8, 0.9, 0.9, 2, 0.8, 0.8, 0.8, 0.8]
 headers = ["Ativo", "Preço", "RSI", "Tend.", "Graham", "Bazin", "Sinais", "ROE", "P/L", "P/VP", "DY"]
 
@@ -195,10 +189,19 @@ def desenhar_tabela(lista, titulo):
         if item['motivos']: c[6].success(", ".join(item['motivos']))
         else: c[6].caption("-")
         
-        # Fundamentos
+        # --- CORREÇÃO DA FORMATAÇÃO AQUI ---
+        # ROE
         c[7].markdown(f":{cor(item['roe'], 0.15)}[{fmt_m(item['roe'])}]")
-        c[8].markdown(f":{cor(item['pl'], 10, True)}[{item['pl'] if item['pl'] else '-':.1f}]")
-        c[9].markdown(f":{cor(item['pvp'], 1.5, True)}[{item['pvp'] if item['pvp'] else '-':.2f}]")
+        
+        # P/L (Protegido contra None)
+        val_pl = f"{item['pl']:.1f}" if item['pl'] is not None else "-"
+        c[8].markdown(f":{cor(item['pl'], 10, True)}[{val_pl}]")
+        
+        # P/VP (Protegido contra None)
+        val_pvp = f"{item['pvp']:.2f}" if item['pvp'] is not None else "-"
+        c[9].markdown(f":{cor(item['pvp'], 1.5, True)}[{val_pvp}]")
+        
+        # DY
         c[10].markdown(f":{cor(item['dy'], 0.06)}[{fmt_m(item['dy'])}]")
         
         st.markdown("---")
@@ -210,7 +213,6 @@ else:
     desenhar_tabela(oportunidades, "🚀 Oportunidades")
     desenhar_tabela(neutros, "📋 Lista Geral")
 
-# Log de erros discreto no final
 if erros_log:
-    with st.expander("Ver logs de erro (Técnico)"):
+    with st.expander("Ver logs de erro"):
         for e in erros_log: st.write(e)
