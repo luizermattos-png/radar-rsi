@@ -75,18 +75,35 @@ def analisar_carteira(lista_tickers):
             roe = get_i('returnOnEquity')
             pl = get_i('trailingPE')
             pvp = get_i('priceToBook')
-            dy = get_i('dividendYield')
+            
+            # --- CORREÇÃO DO DY (CÁLCULO MANUAL) ---
+            # Pegamos o valor pago em R$ no ano (rate) e dividimos pelo preço
+            div_rate = get_i('trailingAnnualDividendRate') 
+            dy = 0
+            
+            if div_rate:
+                # Cálculo exato: Div Pago / Preço Atual
+                dy = div_rate / preco
+            else:
+                # Fallback: se não tiver o Rate, tenta pegar o Yield e garante que é decimal
+                raw_yield = get_i('dividendYield')
+                if raw_yield:
+                    # Se for maior que 1 (ex: 5.24), assume que já é porcentagem e divide por 100
+                    # Se for menor que 1 (ex: 0.05), usa como está
+                    dy = raw_yield / 100 if raw_yield > 1 else raw_yield
 
-            # Graham e Bazin (Apenas cálculo, sem decisão)
+            # Valuation
             graham = None
             if lpa and vpa and lpa > 0 and vpa > 0:
                 try: graham = math.sqrt(22.5 * lpa * vpa)
                 except: pass
 
             bazin = None
-            if dy and dy > 0:
-                dy_calc = dy if dy < 1 else dy / 100
-                bazin = (dy_calc * preco) / 0.06
+            # Cálculo reverso de Bazin: Preço Teto = (DY em R$ / 0.06)
+            # Se tivermos o rate (valor em R$), usamos ele. Se não, derivamos do DY.
+            val_pago_ano = div_rate if div_rate else (dy * preco)
+            if val_pago_ano > 0:
+                bazin = val_pago_ano / 0.06
 
             dados = {
                 'ticker': ticker.replace('.SA', ''),
@@ -98,30 +115,23 @@ def analisar_carteira(lista_tickers):
                 'roe': roe,
                 'pl': pl,
                 'pvp': pvp,
-                'dy': dy,
+                'dy': dy, # Agora isso é garantidamente um decimal (ex: 0.05)
                 'sinal': 'NEUTRO',
                 'motivos': []
             }
             
-            # --- LÓGICA DE DECISÃO INTELIGENTE ---
-            # Ignora Graham e Bazin. Usa RSI, Tendência e Fundamentos básicos.
-            
-            # CENÁRIO 1: Oportunidade Tática (Sobrevenda Exagerada)
+            # --- DECISÃO (RSI + TENDENCIA) ---
             if rsi <= 35:
                 dados['motivos'].append("RSI Baixo")
                 dados['sinal'] = 'COMPRA'
             
-            # CENÁRIO 2: Qualidade em Tendência (Oportunidade Fundamentalista)
-            # Regra: Tendência de Alta + Lucrativa (P/L positivo e < 15) + Eficiente (ROE > 10%)
             elif tendencia == "Alta":
                 condicao_pl = (pl is not None and 0 < pl < 15)
                 condicao_roe = (roe is not None and roe > 0.10)
-                
                 if condicao_pl and condicao_roe:
                     dados['motivos'].append("Tendência + Fundamentos")
                     dados['sinal'] = 'COMPRA'
 
-            # CENÁRIO 3: Venda (Risco Alto)
             if rsi >= 70:
                 dados['motivos'].append("RSI Estourado")
                 dados['sinal'] = 'VENDA'
@@ -156,7 +166,7 @@ vendas = [d for d in dados if d['sinal'] == 'VENDA']
 neutros = [d for d in dados if d['sinal'] == 'NEUTRO']
 
 # ==========================================
-# 1. RADAR DE OPORTUNIDADES
+# 1. RADAR (TOPO)
 # ==========================================
 st.subheader("📢 Radar de Oportunidades")
 c_compra, c_venda = st.columns(2)
@@ -165,11 +175,10 @@ with c_compra:
     st.info(f"🟢 **Comprar ({len(compras)})**")
     if compras:
         for c in compras:
-            # Mostra o motivo específico (RSI ou Fundamentos)
             motivo = c['motivos'][0] if c['motivos'] else "Análise Técnica"
             st.markdown(f"**{c['ticker']}** (R$ {c['preco']:.2f}) 👉 *{motivo}*")
     else:
-        st.caption("Nenhuma oportunidade nos critérios atuais.")
+        st.caption("Nenhuma oportunidade detectada.")
 
 with c_venda:
     st.error(f"🔴 **Vender / Risco ({len(vendas)})**")
@@ -177,7 +186,7 @@ with c_venda:
         for v in vendas:
             st.markdown(f"**{v['ticker']}** (R$ {v['preco']:.2f}) 👉 RSI Alto ({v['rsi']:.0f})")
     else:
-        st.caption("Nenhum ativo sobrecomprado.")
+        st.caption("Nenhum ativo em zona de risco.")
 
 st.markdown("---")
 
@@ -197,8 +206,8 @@ def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
         if meta and inverter and valor < meta: cor = "green"
 
     elif tipo == "percentual":
-        val_ajustado = valor * 100 if valor < 5 else valor
-        texto = f"{val_ajustado:.1f}%"
+        # Agora temos certeza que vem decimal (0.05), então multiplicamos por 100 sempre
+        texto = f"{valor*100:.1f}%" 
         if meta and valor > meta: cor = "green"
 
     elif tipo == "decimal":
@@ -231,13 +240,11 @@ def desenhar_tabela(lista, titulo):
         c[1].write(f"R$ {item['preco']:.2f}")
         exibir_metrica(c[2], item['rsi'], tipo="rsi")
         
-        # Tendência com cor
         tend = item['tendencia']
         cor_t = "green" if "Alta" in tend else ("red" if "Baixa" in tend else None)
         if cor_t: c[3].markdown(f":{cor_t}[{tend}]")
         else: c[3].write(tend)
 
-        # Graham/Bazin (Só visual)
         exibir_metrica(c[4], item['graham'], tipo="dinheiro", meta=item['preco'], inverter=False)
         exibir_metrica(c[5], item['bazin'], tipo="dinheiro", meta=item['preco'], inverter=False)
         
@@ -246,10 +253,10 @@ def desenhar_tabela(lista, titulo):
             else: c[6].success(item['motivos'][0])
         else: c[6].caption("-")
         
-        exibir_metrica(c[7], item['roe'], tipo="percentual", meta=0.15)       # ROE > 15%
-        exibir_metrica(c[8], item['pl'], tipo="decimal", meta=15, inverter=True) # P/L < 15
-        exibir_metrica(c[9], item['pvp'], tipo="decimal", meta=1.5, inverter=True) # P/VP < 1.5
-        exibir_metrica(c[10], item['dy'], tipo="percentual", meta=0.06)       # DY > 6%
+        exibir_metrica(c[7], item['roe'], tipo="percentual", meta=0.10)
+        exibir_metrica(c[8], item['pl'], tipo="decimal", meta=15, inverter=True)
+        exibir_metrica(c[9], item['pvp'], tipo="decimal", meta=1.5, inverter=True)
+        exibir_metrica(c[10], item['dy'], tipo="percentual", meta=0.06)
         
         st.markdown("---")
 
@@ -261,19 +268,17 @@ else:
     desenhar_tabela(neutros, "📋 Lista de Observação")
 
 # ==========================================
-# 3. CRITÉRIOS UTILIZADOS
+# 3. CRITÉRIOS
 # ==========================================
 st.write("")
-with st.expander("ℹ️ Critérios do Algoritmo de Decisão", expanded=True):
+with st.expander("ℹ️ Critérios do Algoritmo", expanded=True):
     st.markdown("""
-    **O Sistema indica COMPRA se acontecer UM destes cenários:**
-    1.  **RSI Baixo:** O RSI está abaixo de 35 (Ativo caiu demais, repique provável).
-    2.  **Qualidade em Tendência:** O ativo está em **Tendência de Alta** E possui bons fundamentos (**P/L entre 0 e 15** E **ROE acima de 10%**).
+    **Sinal de COMPRA:**
+    1.  **RSI Baixo:** RSI <= 35 (Repique Tático).
+    2.  **Qualidade:** Tendência de Alta + P/L Baixo (<15) + ROE Alto (>10%).
     
-    **O Sistema indica VENDA se:**
-    * **RSI Alto:** O RSI está acima de 70 (Ativo "esticado").
-    
-    *Nota: Os indicadores de Graham e Bazin são exibidos na tabela apenas para consulta manual.*
+    **Sinal de VENDA:**
+    * **RSI Alto:** RSI >= 70 (Esticado).
     """)
 
 if erros_log:
