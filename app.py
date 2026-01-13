@@ -20,20 +20,19 @@ MEUS_TICKERS = [
 ]
 
 # ==========================================
-# FUNÇÃO DE ANÁLISE (NATIVA YFINANCE)
+# MOTOR DE ANÁLISE
 # ==========================================
-@st.cache_data(ttl=900) # Cache de 15 min
+@st.cache_data(ttl=900)
 def analisar_carteira(lista_tickers):
     resultados = []
     erros = []
     
     progresso = st.progress(0)
     status = st.empty()
-    
     total = len(lista_tickers)
     
     for i, ticker in enumerate(lista_tickers):
-        status.text(f"Analisando {ticker} ({i+1}/{total})...")
+        status.caption(f"Analisando {ticker} ({i+1}/{total})...")
         progresso.progress((i + 1) / total)
         
         try:
@@ -47,10 +46,10 @@ def analisar_carteira(lista_tickers):
                 if not hist.empty:
                     preco = hist['Close'].iloc[-1]
                 else:
-                    erros.append(f"{ticker}: Sem preço")
+                    erros.append(f"{ticker}: Sem cotação")
                     continue 
             
-            # 2. RSI
+            # 2. RSI e TENDÊNCIA
             hist_long = stock.history(period="3mo")
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
@@ -60,20 +59,17 @@ def analisar_carteira(lista_tickers):
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 
                 mm50 = hist_long['Close'].rolling(window=50).mean().iloc[-1]
-                tendencia = "⬆️ Alta" if preco > mm50 else "⬇️ Baixa"
+                tendencia = "Alta" if preco > mm50 else "Baixa"
             else:
                 rsi = 50
                 tendencia = "-"
 
             # 3. FUNDAMENTOS
             info = {}
-            try:
-                info = stock.info
-            except Exception:
-                pass 
+            try: info = stock.info
+            except: pass 
 
             def get_i(key): return info.get(key)
-            
             lpa = get_i('trailingEps') or get_i('forwardEps')
             vpa = get_i('bookValue')
             roe = get_i('returnOnEquity')
@@ -89,7 +85,8 @@ def analisar_carteira(lista_tickers):
 
             bazin = None
             if dy and dy > 0:
-                bazin = (dy * preco) / 0.06
+                dy_calc = dy if dy < 1 else dy / 100
+                bazin = (dy_calc * preco) / 0.06
 
             dados = {
                 'ticker': ticker.replace('.SA', ''),
@@ -102,21 +99,34 @@ def analisar_carteira(lista_tickers):
                 'pl': pl,
                 'pvp': pvp,
                 'dy': dy,
+                'sinal': 'NEUTRO', # Novo campo
                 'motivos': []
             }
             
-            # Filtros
-            if rsi <= 35: dados['motivos'].append("RSI Baixo")
-            if graham and preco < graham: dados['motivos'].append("Desc. Graham")
-            if bazin and preco < bazin: dados['motivos'].append("Teto Bazin")
+            # --- LÓGICA DE DECISÃO (COMPRA vs VENDA) ---
+            
+            # Sinais de COMPRA (Verde)
+            if rsi <= 35: 
+                dados['motivos'].append("RSI Baixo")
+                dados['sinal'] = 'COMPRA'
+            if graham and preco < graham: 
+                dados['motivos'].append("Desc. Graham")
+                dados['sinal'] = 'COMPRA'
+            if bazin and preco < bazin: 
+                dados['motivos'].append("Teto Bazin")
+                dados['sinal'] = 'COMPRA'
+
+            # Sinais de VENDA (Vermelho) - Prioritário se RSI estiver explodindo
+            if rsi >= 70:
+                dados['motivos'].append("RSI Estourado")
+                dados['sinal'] = 'VENDA'
             
             resultados.append(dados)
 
         except Exception as e:
             erros.append(f"{ticker}: {str(e)}")
         
-        # Pausa anti-bloqueio
-        time.sleep(1.0) 
+        time.sleep(0.5)
 
     progresso.empty()
     status.empty()
@@ -125,36 +135,85 @@ def analisar_carteira(lista_tickers):
 # ==========================================
 # INTERFACE GRÁFICA
 # ==========================================
-c1, c2 = st.columns([3, 1])
-c1.title("💎 Monitor Valuation Pro")
-c1.caption("Versão Corrigida: Formatação Segura")
+st.title("💎 Monitor Valuation Pro")
+st.markdown("---")
 
-if c2.button("🔄 Atualizar Agora"):
-    st.cache_data.clear()
-    st.rerun()
+# Botão de atualização no topo direito
+col_top1, col_top2 = st.columns([6, 1])
+with col_top2:
+    if st.button("🔄 Atualizar"):
+        st.cache_data.clear()
+        st.rerun()
 
-st.divider()
-
+# Executa Análise
 dados, erros_log = analisar_carteira(MEUS_TICKERS)
 
-oportunidades = [d for d in dados if d['motivos']]
-neutros = [d for d in dados if not d['motivos']]
+# Separa os grupos
+compras = [d for d in dados if d['sinal'] == 'COMPRA']
+vendas = [d for d in dados if d['sinal'] == 'VENDA']
+neutros = [d for d in dados if d['sinal'] == 'NEUTRO']
 
-# Helpers de Formatação
-def fmt_m(val, suffix=""): 
-    if val is None: return "-"
-    return f"{val*100:.1f}%{suffix}"
+# ==========================================
+# 1. PAINEL DE DESTAQUES (TOPO)
+# ==========================================
+st.subheader("📢 Resumo de Sinais")
+c_compra, c_venda = st.columns(2)
 
-def fmt_v(val):
-    if val is None: return "-"
-    return f"R$ {val:.2f}"
+with c_compra:
+    st.info(f"🟢 **Oportunidades de Compra ({len(compras)})**")
+    if compras:
+        for c in compras:
+            motivos = ", ".join(c['motivos'])
+            st.markdown(f"**{c['ticker']}** (R$ {c['preco']:.2f}) 👉 *{motivos}*")
+    else:
+        st.caption("Nenhum sinal claro de compra hoje.")
 
-def cor(val, limite, invert=False):
-    if val is None: return "black"
-    if invert: return "green" if val < limite else "black"
-    return "green" if val > limite else "black"
+with c_venda:
+    st.error(f"🔴 **Sinais de Venda / Atenção ({len(vendas)})**")
+    if vendas:
+        for v in vendas:
+            st.markdown(f"**{v['ticker']}** (R$ {v['preco']:.2f}) 👉 RSI Alto ({v['rsi']:.0f})")
+    else:
+        st.caption("Nenhum ativo sobrecomprado (RSI > 70).")
 
-# Config Tabela
+st.markdown("---")
+
+# ==========================================
+# 2. TABELA DETALHADA
+# ==========================================
+
+# Função de formatação visual segura
+def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
+    if valor is None:
+        coluna.caption("-")
+        return
+
+    texto = ""
+    cor = None
+
+    if tipo == "dinheiro":
+        texto = f"R$ {valor:.2f}"
+        if meta and not inverter and valor > meta: cor = "green"
+        if meta and inverter and valor < meta: cor = "green"
+
+    elif tipo == "percentual":
+        val_ajustado = valor * 100 if valor < 5 else valor
+        texto = f"{val_ajustado:.1f}%"
+        if meta and valor > meta: cor = "green"
+
+    elif tipo == "decimal":
+        texto = f"{valor:.2f}"
+        if meta and not inverter and valor > meta: cor = "green"
+        if meta and inverter and valor < meta: cor = "green"
+
+    elif tipo == "rsi":
+        texto = f"{valor:.0f}"
+        if valor <= 35: cor = "green"
+        elif valor >= 70: cor = "red"
+    
+    if cor: coluna.markdown(f":{cor}[{texto}]")
+    else: coluna.markdown(texto)
+
 cols_cfg = [0.8, 0.8, 0.6, 0.8, 0.9, 0.9, 2, 0.8, 0.8, 0.8, 0.8]
 headers = ["Ativo", "Preço", "RSI", "Tend.", "Graham", "Bazin", "Sinais", "ROE", "P/L", "P/VP", "DY"]
 
@@ -162,57 +221,78 @@ def desenhar_tabela(lista, titulo):
     if not lista: return
     st.subheader(f"{titulo} ({len(lista)})")
     
-    h_cols = st.columns(cols_cfg)
-    for i, t in enumerate(headers): h_cols[i].markdown(f"**{t}**")
+    h = st.columns(cols_cfg)
+    for i, t in enumerate(headers): h[i].markdown(f"**{t}**")
     st.divider()
     
     for item in lista:
         c = st.columns(cols_cfg)
+        
         c[0].markdown(f"**{item['ticker']}**")
         c[1].write(f"R$ {item['preco']:.2f}")
+        exibir_metrica(c[2], item['rsi'], tipo="rsi")
         
-        # RSI
-        rsi_c = "green" if item['rsi'] <= 35 else ("red" if item['rsi'] >= 70 else "black")
-        c[2].markdown(f":{rsi_c}[{item['rsi']:.0f}]")
+        tend = item['tendencia']
+        cor_t = "green" if "Alta" in tend else ("red" if "Baixa" in tend else None)
+        if cor_t: c[3].markdown(f":{cor_t}[{tend}]")
+        else: c[3].write(tend)
+
+        exibir_metrica(c[4], item['graham'], tipo="dinheiro", meta=item['preco'], inverter=False)
+        exibir_metrica(c[5], item['bazin'], tipo="dinheiro", meta=item['preco'], inverter=False)
         
-        # Tendencia
-        c[3].markdown(f":{'green' if 'Alta' in item['tendencia'] else 'red'}[{item['tendencia']}]")
-        
-        # Valuation
-        g_c = "green" if item['graham'] and item['preco'] < item['graham'] else "black"
-        c[4].markdown(f":{g_c}[{fmt_v(item['graham'])}]")
-        
-        b_c = "green" if item['bazin'] and item['preco'] < item['bazin'] else "black"
-        c[5].markdown(f":{b_c}[{fmt_v(item['bazin'])}]")
-        
-        # Motivos
-        if item['motivos']: c[6].success(", ".join(item['motivos']))
+        if item['motivos']: 
+            if item['sinal'] == 'VENDA': c[6].error(", ".join(item['motivos']))
+            else: c[6].success(", ".join(item['motivos']))
         else: c[6].caption("-")
         
-        # --- CORREÇÃO DA FORMATAÇÃO AQUI ---
-        # ROE
-        c[7].markdown(f":{cor(item['roe'], 0.15)}[{fmt_m(item['roe'])}]")
-        
-        # P/L (Protegido contra None)
-        val_pl = f"{item['pl']:.1f}" if item['pl'] is not None else "-"
-        c[8].markdown(f":{cor(item['pl'], 10, True)}[{val_pl}]")
-        
-        # P/VP (Protegido contra None)
-        val_pvp = f"{item['pvp']:.2f}" if item['pvp'] is not None else "-"
-        c[9].markdown(f":{cor(item['pvp'], 1.5, True)}[{val_pvp}]")
-        
-        # DY
-        c[10].markdown(f":{cor(item['dy'], 0.06)}[{fmt_m(item['dy'])}]")
+        exibir_metrica(c[7], item['roe'], tipo="percentual", meta=0.15)
+        exibir_metrica(c[8], item['pl'], tipo="decimal", meta=10, inverter=True)
+        exibir_metrica(c[9], item['pvp'], tipo="decimal", meta=1.5, inverter=True)
+        exibir_metrica(c[10], item['dy'], tipo="percentual", meta=0.06)
         
         st.markdown("---")
 
-# Renderiza
 if not dados and erros_log:
-    st.error("Não foi possível carregar dados. O Yahoo pode estar instável.")
+    st.error("Falha ao obter dados. Tente atualizar novamente.")
 else:
-    desenhar_tabela(oportunidades, "🚀 Oportunidades")
-    desenhar_tabela(neutros, "📋 Lista Geral")
+    # Mostra lista completa (ordenada: Compras -> Vendas -> Neutros)
+    desenhar_tabela(compras, "🚀 Oportunidades (Compra)")
+    desenhar_tabela(vendas, "⚠️ Atenção (Venda/Sobrecompra)")
+    desenhar_tabela(neutros, "📋 Lista de Observação (Neutro)")
+
+# ==========================================
+# 3. RODAPÉ EDUCATIVO
+# ==========================================
+st.write("")
+st.write("")
+with st.expander("📚 Como analisar os indicadores? (Guia Rápido)", expanded=True):
+    col_guia1, col_guia2, col_guia3 = st.columns(3)
+    
+    with col_guia1:
+        st.markdown("### 📊 Valuation (Preço Justo)")
+        st.markdown("""
+        * **Graham:** Calcula o "Preço Justo" baseado no lucro e patrimônio. Se o Preço Atual for **menor** que o Preço Graham, a ação está descontada.
+        * **Bazin:** Foca em dividendos. Calcula o preço teto para receber pelo menos 6% de retorno em dividendos.
+        * **P/L (Preço/Lucro):** Em quantos anos você recupera o investimento através do lucro da empresa. Idealmente **abaixo de 10**.
+        * **P/VP (Preço/Valor Patrimonial):** Quanto o mercado paga pelo patrimônio líquido. **Abaixo de 1.0** indica que a empresa vale menos que seus ativos (barata).
+        """)
+
+    with col_guia2:
+        st.markdown("### 📈 Momentum (Timing)")
+        st.markdown("""
+        * **RSI (IFR):** Mede a força da tendência.
+            * **Abaixo de 30:** Sobrevendido (Caiu demais, chance de repique -> Compra).
+            * **Acima de 70:** Sobrecomprado (Subiu demais, chance de correção -> Venda).
+        * **Tendência:** Baseada na Média Móvel de 50 dias. Se o preço está acima da média, tendência de Alta.
+        """)
+
+    with col_guia3:
+        st.markdown("### 🏢 Qualidade (Fundamentos)")
+        st.markdown("""
+        * **ROE (Retorno sobre Patrimônio):** Mede a eficiência da gestão. Quanto dinheiro eles geram com o capital dos sócios. Idealmente **acima de 15%**.
+        * **DY (Dividend Yield):** Quanto a empresa pagou de proventos nos últimos 12 meses em relação ao preço atual. Idealmente **acima de 6%**.
+        """)
 
 if erros_log:
-    with st.expander("Ver logs de erro"):
+    with st.expander("Logs técnicos"):
         for e in erros_log: st.write(e)
