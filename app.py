@@ -50,7 +50,7 @@ def analisar_carteira(lista_tickers):
                     continue 
             
             # 2. TÉCNICA (RSI + TENDÊNCIA)
-            hist_long = stock.history(period="6mo") # Pegamos 6 meses para garantir médias e dividendos
+            hist_long = stock.history(period="6mo") 
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -64,24 +64,20 @@ def analisar_carteira(lista_tickers):
                 rsi = 50
                 tendencia = "-"
 
-            # 3. DY REAL (CÁLCULO NA RAÇA: Soma dos dividendos pagos nos últimos 12m)
+            # 3. DY REAL
             try:
-                # Pega histórico de dividendos
                 divs = stock.dividends
                 if not divs.empty:
-                    # Filtra últimos 365 dias
-                    # Remove fuso horário para comparação segura
                     cutoff = pd.Timestamp.now().replace(tzinfo=None) - pd.Timedelta(days=365)
                     divs.index = divs.index.tz_localize(None) 
-                    
                     soma_12m = divs[divs.index >= cutoff].sum()
-                    dy = soma_12m / preco # Resultado decimal puro (ex: 0.0524)
+                    dy = soma_12m / preco
                 else:
                     dy = 0.0
             except:
                 dy = 0.0
 
-            # 4. FUNDAMENTOS (Info)
+            # 4. FUNDAMENTOS
             info = {}
             try: info = stock.info
             except: pass 
@@ -93,14 +89,13 @@ def analisar_carteira(lista_tickers):
             pl = get_i('trailingPE')
             pvp = get_i('priceToBook')
 
-            # Valuation (Apenas Visual)
+            # Valuation (Visual)
             graham = None
             if lpa and vpa and lpa > 0 and vpa > 0:
                 try: graham = math.sqrt(22.5 * lpa * vpa)
                 except: pass
 
             bazin = None
-            # Preço Teto Bazin: DY em R$ / 0.06
             val_pago_ano = dy * preco
             if val_pago_ano > 0:
                 bazin = val_pago_ano / 0.06
@@ -117,30 +112,39 @@ def analisar_carteira(lista_tickers):
                 'pvp': pvp,
                 'dy': dy,
                 'sinal': 'NEUTRO',
-                'motivos': []
+                'motivos': [],
+                'score_ouro': False # Flag especial
             }
             
-            # --- LÓGICA DE DECISÃO (PEDIDO DO USUÁRIO) ---
+            # --- LÓGICA DE DECISÃO ---
             
-            # 1. Oportunidade por Sobrevenda (Tática)
-            if rsi <= 35:
-                dados['motivos'].append("RSI Baixo")
+            # CRITÉRIOS DE FUNDAMENTOS
+            f_ok_pl = (pl is not None and 0 < pl < 15)
+            f_ok_roe = (roe is not None and roe > 0.10)
+            fundamentos_bons = f_ok_pl and f_ok_roe
+
+            # 1. 🏆 OPORTUNIDADE DE OURO (Combinação Perfeita)
+            # Regra: Tendência Alta + Fundamentos Bons + RSI Saudável (Não estourado)
+            if tendencia == "Alta" and fundamentos_bons and rsi < 65:
+                dados['motivos'].append("💎 TENDÊNCIA + FUNDAMENTOS")
+                dados['sinal'] = 'COMPRA OURO'
+                dados['score_ouro'] = True
+            
+            # 2. Compra Tática (RSI Baixo)
+            elif rsi <= 35:
+                dados['motivos'].append("RSI Baixo (Repique)")
                 dados['sinal'] = 'COMPRA'
             
-            # 2. Oportunidade por Qualidade (Tendência + Fundamentos)
-            # Regra: Tendência Alta + P/L Saudável + ROE Bom
-            elif tendencia == "Alta":
-                condicao_pl = (pl is not None and 0 < pl < 15)
-                condicao_roe = (roe is not None and roe > 0.10)
-                
-                if condicao_pl and condicao_roe:
-                    dados['motivos'].append("Tendência + Qualidade")
-                    dados['sinal'] = 'COMPRA'
+            # 3. Compra por Qualidade (Se não for ouro, mas tiver fundamentos bons e tendência)
+            elif tendencia == "Alta" and fundamentos_bons:
+                dados['motivos'].append("Qualidade Técnica")
+                dados['sinal'] = 'COMPRA'
 
-            # 3. Venda (Risco)
+            # 4. Venda
             if rsi >= 70:
-                dados['motivos'].append("RSI Estourado")
+                dados['motivos'] = ["RSI Estourado"] # Sobrescreve motivos de compra se estiver perigoso
                 dados['sinal'] = 'VENDA'
+                dados['score_ouro'] = False # Anula ouro se tiver risco alto
             
             resultados.append(dados)
 
@@ -167,24 +171,46 @@ with col_top2:
 
 dados, erros_log = analisar_carteira(MEUS_TICKERS)
 
-compras = [d for d in dados if d['sinal'] == 'COMPRA']
+# Filtros de Grupo
+ouros = [d for d in dados if d['score_ouro']]
+# Compras normais (exclui os ouros para não repetir)
+compras_normais = [d for d in dados if d['sinal'] == 'COMPRA' and not d['score_ouro']]
 vendas = [d for d in dados if d['sinal'] == 'VENDA']
 neutros = [d for d in dados if d['sinal'] == 'NEUTRO']
 
 # ==========================================
-# 1. RADAR (TOPO)
+# 1. SESSÃO DE OURO (NOVA)
 # ==========================================
-st.subheader("📢 Radar de Oportunidades")
+if ouros:
+    st.markdown("### 🏆 Oportunidades de Ouro (Técnica + Fundamentos)")
+    # Cria cards visuais lado a lado
+    cols = st.columns(len(ouros)) if len(ouros) < 4 else st.columns(4)
+    
+    for i, item in enumerate(ouros):
+        col_idx = i % 4
+        with cols[col_idx]:
+            st.warning(f"""
+            **{item['ticker']}** (R$ {item['preco']:.2f})  
+            ✅ Tendência de Alta  
+            ✅ P/L: {item['pl']:.1f} | ROE: {item['roe']*100:.0f}%  
+            ✅ RSI: {item['rsi']:.0f} (Saudável)
+            """)
+    st.markdown("---")
+
+# ==========================================
+# 2. RADAR GERAL
+# ==========================================
+st.subheader("📢 Radar Geral")
 c_compra, c_venda = st.columns(2)
 
 with c_compra:
-    st.info(f"🟢 **Comprar ({len(compras)})**")
-    if compras:
-        for c in compras:
+    st.info(f"🟢 **Outras Compras ({len(compras_normais)})**")
+    if compras_normais:
+        for c in compras_normais:
             motivo = c['motivos'][0]
             st.markdown(f"**{c['ticker']}** (R$ {c['preco']:.2f}) 👉 *{motivo}*")
     else:
-        st.caption("Nenhuma oportunidade nos critérios atuais.")
+        st.caption("Apenas oportunidades de Ouro ou Neutras.")
 
 with c_venda:
     st.error(f"🔴 **Vender / Risco ({len(vendas)})**")
@@ -197,7 +223,7 @@ with c_venda:
 st.markdown("---")
 
 # ==========================================
-# 2. TABELA
+# 3. TABELA DETALHADA
 # ==========================================
 def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
     if valor is None:
@@ -212,7 +238,6 @@ def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
         if meta and inverter and valor < meta: cor = "green"
 
     elif tipo == "percentual":
-        # Multiplicamos por 100 pois agora o DY é sempre decimal (0.05)
         texto = f"{valor*100:.2f}%" 
         if meta and valor > meta: cor = "green"
 
@@ -242,7 +267,12 @@ def desenhar_tabela(lista, titulo):
     for item in lista:
         c = st.columns(cols_cfg)
         
-        c[0].markdown(f"**{item['ticker']}**")
+        # Destaque visual para OURO
+        if item['score_ouro']:
+            c[0].markdown(f"⭐ **{item['ticker']}**")
+        else:
+            c[0].markdown(f"**{item['ticker']}**")
+            
         c[1].write(f"R$ {item['preco']:.2f}")
         exibir_metrica(c[2], item['rsi'], tipo="rsi")
         
@@ -251,12 +281,12 @@ def desenhar_tabela(lista, titulo):
         if cor_t: c[3].markdown(f":{cor_t}[{tend}]")
         else: c[3].write(tend)
 
-        # Graham/Bazin (Só visual)
         exibir_metrica(c[4], item['graham'], tipo="dinheiro", meta=item['preco'], inverter=False)
         exibir_metrica(c[5], item['bazin'], tipo="dinheiro", meta=item['preco'], inverter=False)
         
         if item['motivos']: 
             if item['sinal'] == 'VENDA': c[6].error(item['motivos'][0])
+            elif item['score_ouro']: c[6].warning("💎 GOLD (Téc+Fund)")
             else: c[6].success(item['motivos'][0])
         else: c[6].caption("-")
         
@@ -270,7 +300,9 @@ def desenhar_tabela(lista, titulo):
 if not dados and erros_log:
     st.error("Falha ao obter dados. Tente atualizar novamente.")
 else:
-    desenhar_tabela(compras, "🚀 Oportunidades (Compra)")
+    # A lista de Ouros é exibida primeiro na tabela também
+    desenhar_tabela(ouros, "🏆 Seleção de Ouro (Top Picks)")
+    desenhar_tabela(compras_normais, "🚀 Oportunidades Táticas")
     desenhar_tabela(vendas, "⚠️ Atenção (Venda)")
     desenhar_tabela(neutros, "📋 Lista de Observação")
 
@@ -278,16 +310,16 @@ else:
 # 3. CRITÉRIOS
 # ==========================================
 st.write("")
-with st.expander("ℹ️ Lógica do Robô (Como ele decide?)", expanded=True):
+with st.expander("ℹ️ Critérios de Classificação", expanded=True):
     st.markdown("""
-    **Sinal de COMPRA (Verde):**
-    1.  **Repique Técnico:** RSI <= 35.
-    2.  **Qualidade:** Tendência de Alta + (P/L entre 0 e 15) + (ROE > 10%).
+    **🏆 OPORTUNIDADE DE OURO (Critério Triplo):**
+    O ativo precisa atender **TODOS** os pontos abaixo simultaneamente:
+    1.  **Tendência:** Alta (Preço > MM50).
+    2.  **Fundamentos:** Barata (P/L < 15) E Eficiente (ROE > 10%).
+    3.  **RSI:** Saudável (Abaixo de 65, com espaço para subir).
     
-    **Sinal de VENDA (Vermelho):**
-    * **Risco:** RSI >= 70.
-    
-    *Nota: Graham e Bazin não influenciam os sinais, use-os como referência manual.*
+    **🚀 COMPRA TÁTICA:**
+    * RSI Baixo (<= 35) **OU** Bons Fundamentos em Tendência de Alta (mas sem cumprir todos os critérios de Ouro).
     """)
 
 if erros_log:
