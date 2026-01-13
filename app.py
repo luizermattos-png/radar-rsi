@@ -49,7 +49,7 @@ def analisar_carteira(lista_tickers):
                     erros.append(f"{ticker}: Sem cotação")
                     continue 
             
-            # 2. RSI e TENDÊNCIA
+            # 2. TÉCNICA (RSI + TENDÊNCIA)
             hist_long = stock.history(period="3mo")
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
@@ -77,7 +77,7 @@ def analisar_carteira(lista_tickers):
             pvp = get_i('priceToBook')
             dy = get_i('dividendYield')
 
-            # Valuation (Cálculo apenas para exibição)
+            # Graham e Bazin (Apenas cálculo, sem decisão)
             graham = None
             if lpa and vpa and lpa > 0 and vpa > 0:
                 try: graham = math.sqrt(22.5 * lpa * vpa)
@@ -103,16 +103,27 @@ def analisar_carteira(lista_tickers):
                 'motivos': []
             }
             
-            # --- LÓGICA DE DECISÃO (Apenas RSI) ---
+            # --- LÓGICA DE DECISÃO INTELIGENTE ---
+            # Ignora Graham e Bazin. Usa RSI, Tendência e Fundamentos básicos.
             
-            # Sinais de COMPRA
-            if rsi <= 35: 
+            # CENÁRIO 1: Oportunidade Tática (Sobrevenda Exagerada)
+            if rsi <= 35:
                 dados['motivos'].append("RSI Baixo")
                 dados['sinal'] = 'COMPRA'
+            
+            # CENÁRIO 2: Qualidade em Tendência (Oportunidade Fundamentalista)
+            # Regra: Tendência de Alta + Lucrativa (P/L positivo e < 15) + Eficiente (ROE > 10%)
+            elif tendencia == "Alta":
+                condicao_pl = (pl is not None and 0 < pl < 15)
+                condicao_roe = (roe is not None and roe > 0.10)
+                
+                if condicao_pl and condicao_roe:
+                    dados['motivos'].append("Tendência + Fundamentos")
+                    dados['sinal'] = 'COMPRA'
 
-            # Sinais de VENDA
+            # CENÁRIO 3: Venda (Risco Alto)
             if rsi >= 70:
-                dados['motivos'].append("RSI Alto")
+                dados['motivos'].append("RSI Estourado")
                 dados['sinal'] = 'VENDA'
             
             resultados.append(dados)
@@ -132,55 +143,51 @@ def analisar_carteira(lista_tickers):
 st.title("💎 Monitor Valuation Pro")
 st.markdown("---")
 
-# Botão topo
 col_top1, col_top2 = st.columns([6, 1])
 with col_top2:
     if st.button("🔄 Atualizar"):
         st.cache_data.clear()
         st.rerun()
 
-# Executa
 dados, erros_log = analisar_carteira(MEUS_TICKERS)
 
-# Filtros
 compras = [d for d in dados if d['sinal'] == 'COMPRA']
 vendas = [d for d in dados if d['sinal'] == 'VENDA']
 neutros = [d for d in dados if d['sinal'] == 'NEUTRO']
 
 # ==========================================
-# 1. PAINEL DE SINAIS (TOPO)
+# 1. RADAR DE OPORTUNIDADES
 # ==========================================
-st.subheader("📢 Radar de Momentum (RSI)")
+st.subheader("📢 Radar de Oportunidades")
 c_compra, c_venda = st.columns(2)
 
 with c_compra:
-    st.info(f"🟢 **Oportunidades de Compra (RSI < 35)**")
+    st.info(f"🟢 **Comprar ({len(compras)})**")
     if compras:
         for c in compras:
-            st.markdown(f"**{c['ticker']}** (R$ {c['preco']:.2f}) 👉 RSI {c['rsi']:.0f}")
+            # Mostra o motivo específico (RSI ou Fundamentos)
+            motivo = c['motivos'][0] if c['motivos'] else "Análise Técnica"
+            st.markdown(f"**{c['ticker']}** (R$ {c['preco']:.2f}) 👉 *{motivo}*")
     else:
-        st.caption("Nenhum ativo em zona de sobrevenda.")
+        st.caption("Nenhuma oportunidade nos critérios atuais.")
 
 with c_venda:
-    st.error(f"🔴 **Atenção / Venda (RSI > 70)**")
+    st.error(f"🔴 **Vender / Risco ({len(vendas)})**")
     if vendas:
         for v in vendas:
-            st.markdown(f"**{v['ticker']}** (R$ {v['preco']:.2f}) 👉 RSI {v['rsi']:.0f}")
+            st.markdown(f"**{v['ticker']}** (R$ {v['preco']:.2f}) 👉 RSI Alto ({v['rsi']:.0f})")
     else:
-        st.caption("Nenhum ativo em zona de sobrecompra.")
+        st.caption("Nenhum ativo sobrecomprado.")
 
 st.markdown("---")
 
 # ==========================================
-# 2. TABELA DE DADOS
+# 2. TABELA
 # ==========================================
-
-# Formatador Visual Seguro
 def exibir_metrica(coluna, valor, tipo="padrao", meta=None, inverter=False):
     if valor is None:
         coluna.caption("-")
         return
-
     texto = ""
     cor = None
 
@@ -213,7 +220,6 @@ headers = ["Ativo", "Preço", "RSI", "Tend.", "Graham", "Bazin", "Sinais", "ROE"
 def desenhar_tabela(lista, titulo):
     if not lista: return
     st.subheader(f"{titulo} ({len(lista)})")
-    
     h = st.columns(cols_cfg)
     for i, t in enumerate(headers): h[i].markdown(f"**{t}**")
     st.divider()
@@ -225,25 +231,25 @@ def desenhar_tabela(lista, titulo):
         c[1].write(f"R$ {item['preco']:.2f}")
         exibir_metrica(c[2], item['rsi'], tipo="rsi")
         
+        # Tendência com cor
         tend = item['tendencia']
         cor_t = "green" if "Alta" in tend else ("red" if "Baixa" in tend else None)
         if cor_t: c[3].markdown(f":{cor_t}[{tend}]")
         else: c[3].write(tend)
 
-        # Exibe Graham/Bazin apenas visualmente (sem afetar lógica de sinal)
+        # Graham/Bazin (Só visual)
         exibir_metrica(c[4], item['graham'], tipo="dinheiro", meta=item['preco'], inverter=False)
         exibir_metrica(c[5], item['bazin'], tipo="dinheiro", meta=item['preco'], inverter=False)
         
-        # Coluna Sinais
         if item['motivos']: 
             if item['sinal'] == 'VENDA': c[6].error(item['motivos'][0])
             else: c[6].success(item['motivos'][0])
         else: c[6].caption("-")
         
-        exibir_metrica(c[7], item['roe'], tipo="percentual", meta=0.15)
-        exibir_metrica(c[8], item['pl'], tipo="decimal", meta=10, inverter=True)
-        exibir_metrica(c[9], item['pvp'], tipo="decimal", meta=1.5, inverter=True)
-        exibir_metrica(c[10], item['dy'], tipo="percentual", meta=0.06)
+        exibir_metrica(c[7], item['roe'], tipo="percentual", meta=0.15)       # ROE > 15%
+        exibir_metrica(c[8], item['pl'], tipo="decimal", meta=15, inverter=True) # P/L < 15
+        exibir_metrica(c[9], item['pvp'], tipo="decimal", meta=1.5, inverter=True) # P/VP < 1.5
+        exibir_metrica(c[10], item['dy'], tipo="percentual", meta=0.06)       # DY > 6%
         
         st.markdown("---")
 
@@ -255,18 +261,20 @@ else:
     desenhar_tabela(neutros, "📋 Lista de Observação")
 
 # ==========================================
-# 3. RODAPÉ EDUCATIVO
+# 3. CRITÉRIOS UTILIZADOS
 # ==========================================
 st.write("")
-with st.expander("📚 Guia de Indicadores", expanded=True):
-    col_guia1, col_guia2 = st.columns(2)
-    with col_guia1:
-        st.markdown("**Momentum (Gatilho)**")
-        st.markdown("* **RSI < 35:** Oportunidade Técnica (Sobrevendido).")
-        st.markdown("* **RSI > 70:** Risco de Correção (Sobrecomprado).")
-    with col_guia2:
-        st.markdown("**Valuation (Leitura Manual)**")
-        st.markdown("* **Graham/Bazin:** Se o valor for *Verde*, o Preço Atual está abaixo do preço justo calculado.")
+with st.expander("ℹ️ Critérios do Algoritmo de Decisão", expanded=True):
+    st.markdown("""
+    **O Sistema indica COMPRA se acontecer UM destes cenários:**
+    1.  **RSI Baixo:** O RSI está abaixo de 35 (Ativo caiu demais, repique provável).
+    2.  **Qualidade em Tendência:** O ativo está em **Tendência de Alta** E possui bons fundamentos (**P/L entre 0 e 15** E **ROE acima de 10%**).
+    
+    **O Sistema indica VENDA se:**
+    * **RSI Alto:** O RSI está acima de 70 (Ativo "esticado").
+    
+    *Nota: Os indicadores de Graham e Bazin são exibidos na tabela apenas para consulta manual.*
+    """)
 
 if erros_log:
     with st.expander("Logs técnicos"):
