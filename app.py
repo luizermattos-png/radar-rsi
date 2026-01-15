@@ -1,44 +1,60 @@
 import streamlit as st
 import yfinance as yf
+import fundamentus
 import pandas as pd
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ==========================================
 # CONFIGURAÇÃO
 # ==========================================
 st.set_page_config(page_title="Monitor Valuation Pro", layout="wide")
 
-MEUS_TICKERS = [
-    "ALLD3.SA", "ALOS3.SA", "BBAS3.SA", "BHIA3.SA", "CMIG4.SA",
-    "EMBJ3.SA", "FLRY3.SA", "GMAT3.SA", "GUAR3.SA", "HAPV3.SA",
-    "ISAE4.SA", "ITSA4.SA", "ITUB4.SA", "IVVB11.SA", "KLBN4.SA",
-    "MBRF3.SA", "MTRE3.SA", "PETR4.SA", "RAIL3.SA",
-    "RDOR3.SA", "SANB4.SA", "UGPA3.SA", "VALE3.SA", "VULC3.SA",
-    "WEGE3.SA"
+# Lista de Tickers (Para o Fundamentus, NÃO pode ter o .SA no final)
+MEUS_TICKERS_BASE = [
+    "ALLD3", "ALOS3", "BBAS3", "BHIA3", "CMIG4",
+    "EMBJ3", "FLRY3", "GMAT3", "GUAR3", "HAPV3",
+    "ISAE4", "ITSA4", "ITUB4", "IVVB11", "KLBN4",
+    "MBRF3", "MTRE3", "PETR4", "RAIL3",
+    "RDOR3", "SANB4", "UGPA3", "VALE3", "VULC3",
+    "WEGE3"
 ]
 
 # ==========================================
-# MOTOR DE ANÁLISE
+# MOTOR DE ANÁLISE (HÍBRIDO)
 # ==========================================
-@st.cache_data(ttl=900)
-def analisar_carteira(lista_tickers):
+@st.cache_data(ttl=900) # Cache de 15 minutos
+def analisar_carteira(lista_tickers_base):
     resultados = []
     erros = []
     
     progresso = st.progress(0)
     status = st.empty()
-    total = len(lista_tickers)
+    total = len(lista_tickers_base)
     
-    for i, ticker in enumerate(lista_tickers):
-        status.caption(f"Analisando {ticker} ({i+1}/{total})...")
+    # 1. COLETA EM MASSA DOS FUNDAMENTOS (Muito Rápido)
+    try:
+        status.caption("Baixando dados fundamentalistas (Fundamentus)...")
+        # df_fundamentus traz os dados de TODAS as ações da bolsa de uma vez
+        df_fund = fundamentus.get_resultado_raw()
+    except Exception as e:
+        st.error(f"Erro ao conectar no Fundamentus: {e}")
+        return [], []
+
+    # Loop principal
+    for i, ticker_base in enumerate(lista_tickers_base):
+        # Ticker para Yahoo precisa do .SA
+        ticker_yahoo = f"{ticker_base}.SA"
+        
+        status.caption(f"Analisando Técnica {ticker_yahoo} ({i+1}/{total})...")
         progresso.progress((i + 1) / total)
         
         try:
-            stock = yf.Ticker(ticker)
+            # --- PARTE 1: DADOS TÉCNICOS (YAHOO FINANCE) ---
+            stock = yf.Ticker(ticker_yahoo)
             
-            # 1. PREÇO
+            # Preço (Yahoo é melhor para cotação tempo real que Fundamentus)
             try:
                 preco = stock.fast_info['last_price']
             except:
@@ -46,23 +62,15 @@ def analisar_carteira(lista_tickers):
                 if not hist.empty:
                     preco = hist['Close'].iloc[-1]
                 else:
-                    erros.append(f"{ticker}: Sem cotação")
-                    continue 
+                    erros.append(f"{ticker_base}: Sem cotação no Yahoo")
+                    continue
             
-            # 2. TÉCNICA (RSI CALIBRADO - WILDER'S SMOOTHING)
-            # Pegamos 6 meses para que a média exponencial tenha tempo de estabilizar
+            # RSI Calibrado (Wilder's Smoothing)
             hist_long = stock.history(period="6mo") 
-            
             if len(hist_long) > 30:
                 delta = hist_long['Close'].diff()
-                
-                # --- CORREÇÃO MATEMÁTICA AQUI ---
-                # Antes (Errado): rolling(window=14).mean() -> Média Simples
-                # Agora (Certo/Investing): ewm(alpha=1/14).mean() -> Média Exponencial de Wilder
-                
                 gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
                 loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-                
                 rs = gain / loss
                 rsi = 100 - (100 / (1 + rs)).iloc[-1]
                 
@@ -72,44 +80,54 @@ def analisar_carteira(lista_tickers):
                 rsi = 50
                 tendencia = "-"
 
-            # 3. DY REAL
-            try:
-                divs = stock.dividends
-                if not divs.empty:
-                    cutoff = pd.Timestamp.now().replace(tzinfo=None) - pd.Timedelta(days=365)
-                    divs.index = divs.index.tz_localize(None) 
-                    soma_12m = divs[divs.index >= cutoff].sum()
-                    dy = soma_12m / preco
-                else:
-                    dy = 0.0
-            except:
-                dy = 0.0
+            # --- PARTE 2: FUNDAMENTOS (BIBLIOTECA FUNDAMENTUS) ---
+            # Aqui pegamos os dados reais, sem depender do Yahoo
+            
+            lpa = 0
+            vpa = 0
+            roe = 0
+            pl = 0
+            pvp = 0
+            dy = 0
+            
+            if ticker_base in df_fund.index:
+                info_f = df_fund.loc[ticker_base]
+                
+                # Fundamentus retorna P/L como 10.0 (ok)
+                # Retorna ROE como 0.15 (15%) (ok)
+                pl = info_f['P/L']
+                pvp = info_f['P/VP']
+                roe = info_f['ROE']
+                dy = info_f['DY'] # Vem decimal (ex: 0.06)
+                
+                # Para Graham, precisamos calcular LPA e VPA
+                # LPA = Preço / PL
+                # VPA = Preço / PVP
+                if pl != 0: lpa = preco / pl
+                if pvp != 0: vpa = preco / pvp
+            
+            else:
+                # Caso raro: ticker não está no Fundamentus (ex: IVVB11 - ETF não tem P/L)
+                pass
 
-            # 4. FUNDAMENTOS
-            info = {}
-            try: info = stock.info
-            except: pass 
+            # --- PARTE 3: CÁLCULOS FINAIS ---
 
-            def get_i(key): return info.get(key)
-            lpa = get_i('trailingEps') or get_i('forwardEps')
-            vpa = get_i('bookValue')
-            roe = get_i('returnOnEquity')
-            pl = get_i('trailingPE')
-            pvp = get_i('priceToBook')
-
-            # Valuation (Visual)
+            # Graham
             graham = None
-            if lpa and vpa and lpa > 0 and vpa > 0:
+            if lpa > 0 and vpa > 0:
                 try: graham = math.sqrt(22.5 * lpa * vpa)
                 except: pass
 
+            # Bazin (Baseado no DY do Fundamentus que é confiável)
             bazin = None
-            val_pago_ano = dy * preco
-            if val_pago_ano > 0:
-                bazin = val_pago_ano / 0.06
+            if dy > 0:
+                # Preço Teto = (Dividendos Pagos / 0.06)
+                # Dividendos Pagos = Preço * DY
+                div_pago = preco * dy
+                bazin = div_pago / 0.06
 
             dados = {
-                'ticker': ticker.replace('.SA', ''),
+                'ticker': ticker_base,
                 'preco': preco,
                 'rsi': rsi,
                 'tendencia': tendencia,
@@ -126,10 +144,9 @@ def analisar_carteira(lista_tickers):
             
             # --- LÓGICA DE DECISÃO ---
             
-            # Critérios de Fundamentos
-            f_ok_pl = (pl is not None and 0 < pl < 15)
-            f_ok_roe = (roe is not None and roe > 0.10)
-            fundamentos_bons = f_ok_pl and f_ok_roe
+            # Fundamentos Bons (Agora usando dados confiáveis)
+            # P/L entre 0 e 15 E ROE > 10%
+            fundamentos_bons = (0 < pl < 15) and (roe > 0.10)
 
             # 1. 🏆 OPORTUNIDADE DE OURO
             if tendencia == "Alta" and fundamentos_bons and rsi < 65:
@@ -156,9 +173,10 @@ def analisar_carteira(lista_tickers):
             resultados.append(dados)
 
         except Exception as e:
-            erros.append(f"{ticker}: {str(e)}")
+            erros.append(f"{ticker_base}: {str(e)}")
         
-        time.sleep(0.5)
+        # Pausa menor (Yahoo é usado menos agora)
+        time.sleep(0.2)
 
     progresso.empty()
     status.empty()
@@ -167,7 +185,8 @@ def analisar_carteira(lista_tickers):
 # ==========================================
 # INTERFACE GRÁFICA
 # ==========================================
-st.title("💎 Monitor Valuation Pro")
+st.title("💎 Monitor Valuation Pro (Híbrido)")
+st.caption("Fonte: Yahoo Finance (Técnica) + Fundamentus (Indicadores)")
 st.markdown("---")
 
 col_top1, col_top2 = st.columns([6, 1])
@@ -176,7 +195,7 @@ with col_top2:
         st.cache_data.clear()
         st.rerun()
 
-dados, erros_log = analisar_carteira(MEUS_TICKERS)
+dados, erros_log = analisar_carteira(MEUS_TICKERS_BASE)
 
 ouros = [d for d in dados if d['score_ouro']]
 compras_normais = [d for d in dados if d['sinal'] == 'COMPRA' and not d['score_ouro']]
@@ -185,7 +204,7 @@ neutros = [d for d in dados if d['sinal'] == 'NEUTRO']
 
 # 1. SESSÃO DE OURO
 if ouros:
-    st.markdown("### 🏆 Oportunidades de Ouro (Técnica + Fundamentos)")
+    st.markdown("### 🏆 Oportunidades de Ouro")
     cols = st.columns(len(ouros)) if len(ouros) < 4 else st.columns(4)
     for i, item in enumerate(ouros):
         col_idx = i % 4
@@ -194,7 +213,7 @@ if ouros:
             **{item['ticker']}** (R$ {item['preco']:.2f})  
             ✅ Tendência de Alta  
             ✅ P/L: {item['pl']:.1f} | ROE: {item['roe']*100:.0f}%  
-            ✅ RSI: {item['rsi']:.0f} (Wilder)
+            ✅ RSI: {item['rsi']:.0f}
             """)
     st.markdown("---")
 
@@ -264,10 +283,8 @@ def desenhar_tabela(lista, titulo):
     for item in lista:
         c = st.columns(cols_cfg)
         
-        if item['score_ouro']:
-            c[0].markdown(f"⭐ **{item['ticker']}**")
-        else:
-            c[0].markdown(f"**{item['ticker']}**")
+        if item['score_ouro']: c[0].markdown(f"⭐ **{item['ticker']}**")
+        else: c[0].markdown(f"**{item['ticker']}**")
             
         c[1].write(f"R$ {item['preco']:.2f}")
         exibir_metrica(c[2], item['rsi'], tipo="rsi")
@@ -300,15 +317,6 @@ else:
     desenhar_tabela(compras_normais, "🚀 Oportunidades Táticas")
     desenhar_tabela(vendas, "⚠️ Atenção (Venda)")
     desenhar_tabela(neutros, "📋 Lista de Observação")
-
-# 4. CRITÉRIOS
-st.write("")
-with st.expander("ℹ️ Ajustes Técnicos Realizados", expanded=True):
-    st.markdown("""
-    **RSI Calibrado (Wilder's Smoothing):** Agora o cálculo usa Média Exponencial (alpha=1/14) em vez de Simples, para alinhar os valores com o **Investing.com**.
-    
-    *Nota: Pequenas diferenças (decimais) ainda podem ocorrer se o Investing.com estiver usando dados intra-day (minuto a minuto) e nós usarmos o fechamento diário.*
-    """)
 
 if erros_log:
     with st.expander("Logs técnicos"):
